@@ -1,0 +1,248 @@
+// The frame's chips and their two sources (C7 execution document, "Composer public surface" Frame bindings, "Composer
+// frame", "Unstarted sessions"): every chip takes a binding (value, options, why it is disabled, and a set that
+// answers the engine's or the intent's verdict), so the chips never know which store is behind them. An unstarted
+// session binds to C10's setup intent, every chip writing through the hook's `patch` and all of them disabled with one
+// reason while the first send is starting or C10 holds the message. A live session binds to C3: model and effort
+// through `session.setModel` and `session.setEffort`, the mode through the shared mode menu's binding (M5), additional
+// directories through `session.applyFlagSettings` (`/add-dir` is gated to remote entrypoints headless, SPEC 28 §22);
+// location and branch are read-only under a live engine: where a session runs is fixed once it starts (§19, the C8
+// recomposition entry). New chat (2026-10-01, the owner's ruling after Codex's new-thread composer): an unstarted
+// tab chooses where it runs in the project row above the box (the project chip with its read-only branch, and the
+// Worktree checkbox), so the toolbar's location chip is a started session's and only reads.
+import type { Effort } from '@shared/engine/launch-spec';
+import { EffortSchema } from '@shared/engine/launch-spec';
+import type { EngineSessionStatus } from '@shared/engine/status';
+import type { UserEngineDefaults } from '@shared/ipc/schema/settings';
+import type { SessionRecord } from '@shared/graph/session';
+import type { MawsBridge } from '@shared/ipc/schema';
+import type { ListModelsResponse } from '@shared/wire/control';
+import { ipc } from '../../ipc/client';
+import { branchLabel, recordBranch, type GitBranchAnswer } from '../../sessions/branch-label'; // W9 (H2)
+import { liveModeBinding, MODE_OPTIONS, MODE_REFUSAL_WORDS, type ModeBinding } from '../../statusline';
+import type { Availability } from '@shared/ipc/schema/session'; // P2-A
+import { acquireSession, refusalWords } from '../../sessions/acquire'; // P2-A
+import { availabilityRefusal } from '../../sessions/availability'; // P2-A
+import { locationPath, type HookResult, type ModelInfo, type SetupIntentHook, type SetupProject } from '../setup-intent';
+import { ENDED, MESSAGE_HELD, STARTING } from '../submit/submit-state';
+import { aliasOf, chipLabel, DEFAULT_ROW, modelAsk, type HeldAsk } from '@shared/sessions/model-label';
+
+export interface ChipBinding<V, O = never> {
+  value: V;
+  options: O[];
+  disabled: string | null;
+  set: (v: V, progress?: (phase: ChipPhase) => void) => Promise<HookResult>; // P2-A: `progress` hears a start before the change
+}
+
+// P2-A (2026-10-09): a live chip's change on a session with no ready process starts it first, then applies
+export type ChipPhase = 'starting' | 'applying';
+
+export interface ModelChoice {
+  model: string | null;
+  effort: Effort | null;
+}
+
+// W3: the model chip's binding carries its words, `<alias> <effort>` (@shared/sessions/model-label.ts), worked out here from the
+// session's source: the intent with the user's own settings while unstarted, the engine's status and effective effort once live.
+// `requested` (P2-F wave S, the sitting's A1.6): the words name a model the session asked for and the engine has not
+// reported running yet (its last init frame named another); the chip marks it as the selector marks its row.
+export type ModelBinding = ChipBinding<ModelChoice, ModelInfo> & { label: string; requested?: boolean };
+
+// The toolbar's location chip (W2), read-only: where a started session runs, its branch, and why it cannot move.
+export interface LocationView {
+  path: string;
+  branch: string | null;
+  note: string;
+}
+
+// New chat: the unstarted tab's project row, the hook's project facts with their writes gated as every chip's are.
+export type ProjectRowBinding = SetupProject & { disabled: string | null };
+
+export interface FrameBindings {
+  location: LocationView; // the toolbar's LocationChip (W2), shown once the session has started
+  project: ProjectRowBinding | null; // New chat: the row above the box on an unstarted tab (null once started)
+  model: ModelBinding; // the toolbar's ModelChip; the selector C11 registers opens from it (W3)
+  mode: ModeBinding; // the toolbar's ModeChip, on the shared mode menu (M5)
+  directories: ChipBinding<string[]>; // the "+" menu's Add directory… (W10)
+}
+
+export const LOCATION_FIXED = 'The location is fixed once the session starts';
+
+const refused = (error: string) => async (): Promise<HookResult> => ({ ok: false, error });
+
+// Whether a model option is the model named: a live session reports the resolved id, which C3's list names as an
+// option's value or its `resolvedModel`. The chip shows and checks through it; the binding switches only when it differs.
+export const modelMatches = (option: ModelInfo, model: string | null): boolean => model !== null && (option.value === model || (option as { resolvedModel?: string }).resolvedModel === model);
+
+// ---- unstarted: C10's setup intent ------------------------------------------------------------------------------
+
+// What an unstarted tab's chip names (W3): what the engine will use, the intent's own choice first, then the user's
+// settings (`model`, `effortLevel`; read only), then the catalogue's `default` row resolved to its model.
+export function intentModelLabel(intent: Pick<SetupIntentHook['intent'], 'model' | 'effort'>, models: readonly ModelInfo[], defaults: UserEngineDefaults | null): string {
+  return chipLabel(aliasOf(intent.model ?? defaults?.model ?? DEFAULT_ROW, models), intent.effort ?? defaults?.effortLevel ?? null);
+}
+
+export function intentBindings(hook: SetupIntentHook, gate: { starting: boolean }, defaults: UserEngineDefaults | null = null): FrameBindings {
+  const { intent, options } = hook;
+  const gated = gate.starting ? STARTING : intent.message !== null ? MESSAGE_HELD : null;
+  const through = <V>(write: (v: V) => Parameters<SetupIntentHook['patch']>[0]) => (gated === null ? (v: V) => hook.patch(write(v)) : refused(gated));
+  const chosen = options.models.find((m) => m.value === (intent.model ?? defaults?.model ?? DEFAULT_ROW));
+  const project = hook.project ?? null;
+  return {
+    // a hook without project facts (the harness's stub) keeps the toolbar's chip, naming the intent's location
+    location: { path: intent.location === null ? '' : locationPath(intent.location), branch: null, note: gated ?? 'Where this session will run' },
+    project:
+      project === null
+        ? null
+        : {
+            ...project,
+            disabled: gated,
+            choose: gated === null ? (projectId) => project.choose(projectId) : refused(gated),
+            newProject: gated === null ? () => project.newProject() : refused(gated),
+            setWorktree: gated === null ? (on) => project.setWorktree(on) : refused(gated),
+          },
+    model: {
+      value: { model: intent.model, effort: intent.effort },
+      label: intentModelLabel(intent, options.models, defaults),
+      options: options.models,
+      disabled: gated,
+      set: through((m: ModelChoice) => ({ model: m.model, effort: m.effort })),
+    },
+    mode: {
+      value: intent.permissionMode ?? defaults?.defaultMode ?? 'auto', // W3: what the launch passes for an intent that chose none
+      options: MODE_OPTIONS.map((o) => o.mode),
+      disabled: gated,
+      refusal: null,
+      autoUnavailable: chosen !== undefined && chosen.supportsAutoMode !== true ? MODE_REFUSAL_WORDS.auto_mode_model : null, // W3: absent is not auto
+      set: through((permissionMode) => ({ permissionMode })),
+    },
+    directories: { value: intent.additionalDirectories, options: [], disabled: gated, set: through((additionalDirectories: string[]) => ({ additionalDirectories })) },
+  };
+}
+
+// ---- live: C3's session ---------------------------------------------------------------------------------------
+
+type ModelOption = ListModelsResponse['models'][number];
+
+// What the live chips read beside the status and the record: C3's `listModels`, the engine's workspace directories,
+// git's answer for the branch, and a refresh of the rules after a directory was added. The two engine reads are control
+// requests, so the composer makes them only when a chip that shows them opens (never per mount: many open sessions
+// would each ask the engine, and a replayed engine refuses any request its journal did not record).
+export interface LiveReads {
+  models?: readonly ModelOption[] | null;
+  modelNames?: readonly ModelInfo[] | null; // the route's model catalogue (`engine.models`), naming the model before any list is read
+  effort?: Effort | null; // W3: the effort the engine runs at (`get_settings.applied.effort`), when known
+  directories?: readonly string[] | null;
+  git?: GitBranchAnswer | null; // W9 (H2): git's answer for the session's directory, null until it has one
+  refresh?: () => void;
+  // P2-F wave S (the review of S-chip): the model this renderer asked for and the engine has not reported since, held
+  // for the selector and the chip alike (widgets/model.ts `heldModel`; `value` null: Default, `starting` while the
+  // session starts for it); none when absent
+  asked?: HeldAsk | null;
+}
+
+// `list_permission_rules`'s workspace directories as paths (the wire types them loosely: a path, or an object naming one).
+export function workspaceDirectoriesOf(raw: readonly unknown[]): string[] {
+  return raw.flatMap((d) => (typeof d === 'string' ? [d] : typeof d === 'object' && d !== null && typeof (d as { path?: unknown }).path === 'string' ? [(d as { path: string }).path] : []));
+}
+
+// P2-A (2026-10-09; the execution document §5.6): a record with no ready process is writable by its availability: a
+// model, effort, mode or directory choice starts the session (`chip`) and then applies as a live one's does; only a
+// terminal or a job holding it, or its archive, refuses, in words. Without an availability the status decides.
+export function liveBindings(status: EngineSessionStatus | null, record: SessionRecord | null, reads: LiveReads = {}, client: MawsBridge = ipc, availability?: Availability | null): FrameBindings {
+  const appSessionId = status?.appSessionId ?? record!.appId;
+  const ready = status?.process === 'ready';
+  const writable = ready ? null : availabilityRefusal(availability === undefined ? 'resumable' : availability, record?.holder ?? null);
+  // P2-A: the acquisition a choice on a session with no ready process runs first; a refusal in words
+  const acquired = async (progress?: (phase: ChipPhase) => void): Promise<HookResult | null> => {
+    if (ready) return null;
+    if (writable !== null) return { ok: false, error: writable };
+    try {
+      progress?.('starting');
+      const outcome = await acquireSession(appSessionId, 'chip', {}, client);
+      if (outcome.status === 'ready') progress?.('applying');
+      return outcome.status === 'ready' ? null : { ok: false, error: refusalWords(outcome) ?? outcome.status };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  };
+  // W3: named from the options this mount listed, else the route's catalogue; the effort the engine runs at, else the requested one
+  const names = reads.models && reads.models.length > 0 ? reads.models : (reads.modelNames ?? []);
+  // P2-F wave S (A1.6 and its review): one rule with the selector (`modelAsk`): the model asked for (the request the
+  // selector holds, a dormant choice or an explicit Default included, else the status's or the launch's) is named and
+  // marked requested until the engine reports running it, compared as exact ids through the catalogue; otherwise the
+  // reported one. `default` is named by what it runs, and by no model when the catalogue cannot say.
+  const reported = status && (status.model.requested !== null || status.model.resolved !== null) ? status.model : null;
+  const facts = reported ?? record?.model ?? { requested: null, resolved: null };
+  const { resolved } = facts;
+  const ask = modelAsk(reads.asked ?? undefined, facts, names);
+  const unconfirmed = ask.pending;
+  const current: ModelChoice = { model: ask.explicit ? ask.asked : resolved, effort: status?.effort ?? null };
+  const named = (id: string | null) => {
+    const alias = aliasOf(id, names);
+    return alias === DEFAULT_ROW ? null : alias;
+  };
+  const shownEffort = reads.effort !== undefined ? reads.effort : status ? status.effort : (EffortSchema.safeParse(record?.effort).data ?? null);
+  const directories = [...(reads.directories ?? record?.additionalDirectories ?? [])];
+  return {
+    // W9 (H2): the record's branch only until git has answered; then git's, "detached", or none for a non-repository
+    location: { path: status?.cwd ?? record?.directory ?? '', branch: branchLabel(recordBranch(record), reads.git ?? null), note: LOCATION_FIXED },
+    project: null,
+    model: {
+      value: current,
+      label: chipLabel(unconfirmed ? named(ask.asked ?? DEFAULT_ROW) : named(resolved ?? ask.asked), shownEffort),
+      requested: unconfirmed,
+      options: [...(reads.models ?? [])],
+      disabled: writable,
+      set: async (next) => {
+        const refused = await acquired(); // P2-A
+        if (refused) return refused;
+        const picked = reads.models?.find((m) => m.value === next.model);
+        // the model asked for, by its value or its resolved id; the reported one only while it is the one asked for
+        const same = next.model === current.model || (picked !== undefined && modelMatches(picked, current.model)) || (!unconfirmed && next.model === resolved);
+        if (!same) {
+          const result = await client.invoke('session.setModel', { appSessionId, model: next.model });
+          if (!result.ok) return { ok: false, error: result.error.message };
+          if (!result.value.ok) return { ok: false, error: result.value.error ?? 'The engine refused the model' };
+        }
+        if (next.effort !== current.effort) {
+          const result = await client.invoke('session.setEffort', { appSessionId, effort: next.effort });
+          if (!result.ok) return { ok: false, error: result.error.message };
+        }
+        return { ok: true };
+      },
+    },
+    mode: liveModeBinding({ appId: appSessionId, permissionMode: status?.permissionMode ?? record!.permissionMode, model: status?.model ?? record!.model }, status, reads.models ?? null, client, writable),
+    directories: {
+      value: directories,
+      options: [],
+      disabled: writable,
+      // The engine's own list is read at the moment of the change (the chip's value may be the record's, or stale), and
+      // the new directories are added to it: flag settings replace the list, so nothing the engine holds is dropped.
+      set: async (next, progress) => {
+        const refused = await acquired(progress); // P2-A
+        if (refused) return refused;
+        const rules = await client.invoke('session.listPermissionRules', { appSessionId });
+        if (!rules.ok) return { ok: false, error: rules.error.message };
+        const held = workspaceDirectoriesOf(rules.value.state.workspaceDirectories);
+        const additionalDirectories = [...held, ...next.filter((d) => !held.includes(d))];
+        const result = await client.invoke('session.applyFlagSettings', { appSessionId, settings: { permissions: { additionalDirectories } } });
+        if (!result.ok) return { ok: false, error: result.error.message };
+        reads.refresh?.();
+        return { ok: true };
+      },
+    },
+  };
+}
+
+// ---- neither: no intent, no status, no record (a session nothing knows yet, e.g. a scenario's new tab) ------------
+
+export function endedBindings(reason: string = ENDED): FrameBindings {
+  const none = refused(reason);
+  return {
+    location: { path: '', branch: null, note: reason },
+    project: null,
+    model: { value: { model: null, effort: null }, label: chipLabel(null, null), options: [], disabled: reason, set: none },
+    mode: { value: null, options: MODE_OPTIONS.map((o) => o.mode), disabled: reason, refusal: null, autoUnavailable: null, set: none },
+    directories: { value: [], options: [], disabled: reason, set: none },
+  };
+}

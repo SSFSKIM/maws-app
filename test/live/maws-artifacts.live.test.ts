@@ -1,0 +1,168 @@
+// E2 M2's live recording (docs/doperpowers/plans/2026-10-06-e2-deliverables.md, Plan of Work M2): the four artifact tools
+// of the `maws` server against the installed Claude Code (`binary: null`), through MAWS's own engine host (LiveHost:
+// registerEngineIpc, the launcher, EngineSession, the artifact store, the journal), under a scratch config home
+// under /tmp, through ClaudeUsage's relay, on Haiku in default permission mode with every permission allowed once. The
+// host has no main here, so the case plays main's part of `artifact_screenshot`: it answers each `maws.artifact.capture`
+// with a solid-green 64×64 PNG through `maws.artifact.captured`. The page the prompt asks for is red, so a reply that
+// names green proves the model read the image block (Decision Log 26). The owner's ~/.claude.json is read only, for the
+// A-15 delta. The journal (with E2's provenance) and the engine's transcript land under the run's `<userData>/exports/`
+// (printed) and are copied into spikes/protocol-probe/fixtures/pass3/p1-maws-artifacts.jsonl and
+// test/fixtures/transcripts/p1-maws-artifacts.jsonl by hand after a look by eye.
+// The gate, the scratch repository, the allow-once loop and the export `finally` are the shared live harness's
+// (test/live/support/harness.ts), as E1's maws-tools.live.test.ts uses them.
+// `MAWS_LIVE=1 pnpm exec vitest run --project live test/live/maws-artifacts.live.test.ts`
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { SessionEvent } from '@shared/graph/events';
+import type { MawsArtifactCapture } from '@shared/ipc/schema/maws';
+import { TOOL_ERRORS } from '@shared/maws/tools';
+import type { JournalRow } from '@shared/wire/journal';
+import { openDocuments } from '../../src/engine-host/documents';
+import { liveSpec } from './support/live';
+import { LiveHost } from './support/live-host';
+import { answerWhileRunning, closeSession, liveCase, openGate, readJournal, scratchRepo, type GateResult } from './support/harness';
+
+const TURN_MS = 300_000; // the machine is heavily loaded: generous waits
+const CASE_MS = 600_000;
+const PIN = '7094958a1431369ef699ff9875cd7e9259a37695'; // the P1 spec's blob at master 2224b4b0 (Decision Log 24)
+const SCENARIO = 'p1-maws-artifacts';
+
+// A solid-green (#00ff00) 64×64 RGB PNG, 132 bytes, built with zlib in the shape of M0's red constant
+// (scenarios/pass3/p1-sdk-mcp-image.mjs; copied, not imported: importing the scenario runs the engine at load).
+const GREEN_SQUARE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAS0lEQVR42u3PQQkAAAgAsetfWiP4FgYrsJp+ExAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBC4LLjs8OJxKlMxAAAAAElFTkSuQmCC';
+
+// The document's prompt, steered as M0's was (Surprises): every tool by its full `mcp__maws__` name, and the calls made
+// "yourself, not through an agent", since Haiku otherwise handed a deferred MCP tool's call to a background Agent.
+const PROMPT =
+  'Write a self-contained HTML file named dashboard.html in the working directory whose body is one full-page div with an inline red background and the text HELLO_E2, with no external resources. ' +
+  'Register it with the mcp__maws__artifact_create tool using id "dash" and title "Dashboard". ' +
+  'Then call the mcp__maws__artifact_screenshot tool for id "dash" and note in one word what colour fills the picture (report what the picture shows; do not investigate). ' +
+  // P3-A (M6): E2's artifact_update retired into artifact_publish, which takes the page's text and the revision read
+  'Then call the mcp__maws__artifact_publish tool with artifact "dash", baseRevision the revision artifact_create returned, and files {"index.html": the same page with a blue background}. ' +
+  'Then call the mcp__maws__artifact_list tool. ' +
+  'Then call mcp__maws__artifact_publish with artifact "nope", baseRevision 1 and the same files, and note the error text. ' +
+  'Make every one of these calls yourself, one after another, not through an agent. ' +
+  'Reply with one line: the colour word, the number of artifacts artifact_list reported, and the first six words of the error.';
+
+type Kind = SessionEvent['kind'];
+type Ev<K extends Kind> = Extract<SessionEvent, { kind: K }>;
+const ofKind = <K extends Kind>(events: SessionEvent[], kind: K): Ev<K>[] => events.filter((e): e is Ev<K> => e.kind === kind);
+const mainTurnsEnded = (events: SessionEvent[]) => ofKind(events, 'turn.ended').filter((e) => e.parentToolUseId === null && !e.isEchoReceipt);
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const textOf = (content: unknown): string => (typeof content === 'string' ? content : Array.isArray(content) ? content.map((b: { text?: unknown }) => (typeof b.text === 'string' ? b.text : '')).join('\n') : JSON.stringify(content));
+
+let gate: GateResult;
+const report: string[] = [];
+
+beforeAll(async () => {
+  gate = await openGate('e2', (line) => report.push(line));
+  if ('skip' in gate) return;
+  report.push(`engine ${gate.bin} (${gate.version}); scratch home ${gate.home}; userData ${gate.userData}`, `A-15 before: ${gate.a15Before.length} keys`);
+}, 300_000);
+
+afterAll(() => {
+  for (const line of report) console.log(`   ${line}`);
+});
+
+// The journal row the host wrote to answer the engine's `mcp_message` request `requestId`: its JSON-RPC response.
+type McpContent = { type: string; text?: string; data?: string; mimeType?: string }[];
+function mcpResponseOf(rows: JournalRow[], requestId: string): { result: { content: McpContent; isError?: boolean } } | undefined {
+  const row = rows.find((r) => r.direction === 'out' && (r.frame as { type?: string; response?: { request_id?: string } }).type === 'control_response' && (r.frame as { response: { request_id: string } }).response.request_id === requestId);
+  return (row?.frame as { response: { response: { mcp_response: { result: { content: McpContent; isError?: boolean } } } } } | undefined)?.response.response.mcp_response;
+}
+
+describe('the maws artifact tools, live (E2 M2)', () => {
+  it('creates, screenshots, updates and lists an artifact, and refuses an unknown id', async (ctx) => {
+    const g = liveCase(gate, ctx);
+    const documents = openDocuments(g.userData, (line) => report.push(line))!; // P3-A (M6): the tools' store, as the app's host opens it
+    const host = new LiveHost({ userData: g.userData, configHome: g.home, binary: null, artifacts: () => documents.store });
+    const repo = scratchRepo(g, 'e2');
+    const spec = liveSpec(repo, { model: 'haiku', permissionMode: 'default', subagentModel: null });
+    const id = spec.appSessionId;
+    const events = () => host.events(id);
+    let journalPath = '';
+    let stopAnswering = () => {};
+    try {
+      const { status } = await host.launch(spec, 120_000);
+      journalPath = status.journalPath;
+      // every permission allowed once as it arrives; every capture answered with the green square, as main would
+      const captured = new Set<string>();
+      stopAnswering = answerWhileRunning(host, id, [
+        async () => {
+          for (const e of host.emitted) {
+            if (e.name !== 'maws.artifact.capture') continue;
+            const capture = e.payload as MawsArtifactCapture;
+            if (capture.appSessionId !== id || captured.has(capture.requestId)) continue;
+            captured.add(capture.requestId);
+            console.log(`   capture: ${JSON.stringify(capture)}`);
+            await host
+              .call('maws.artifact.captured', { appSessionId: id, requestId: capture.requestId, result: { ok: true, png: GREEN_SQUARE_PNG, width: 64, height: 64, consoleErrors: [] } })
+              .then((answered) => console.log(`   captured: ${JSON.stringify(answered)}`))
+              .catch((error: unknown) => console.log(`   capture answer failed: ${String(error)}`));
+          }
+        },
+      ]);
+
+      await host.call('session.send', { appSessionId: id, content: PROMPT });
+      const init = await host.waitFor(() => ofKind(events(), 'session.init')[0], 'the init', TURN_MS);
+      expect(init.tools).toEqual(expect.arrayContaining(['mcp__maws__artifact_create', 'mcp__maws__artifact_publish', 'mcp__maws__artifact_list', 'mcp__maws__artifact_screenshot']));
+      const ended = await host.waitFor(() => mainTurnsEnded(events())[0], 'the turn', TURN_MS);
+      await host.waitFor(() => host.status(id)?.turn === null && host.status(id)?.pendingRequests === 0, 'idle with nothing pending', TURN_MS);
+      await delay(3_000);
+      stopAnswering();
+      console.log(`   reply: ${JSON.stringify(ended.resultText)}`);
+      report.push(`reply: ${JSON.stringify(ended.resultText)}`);
+      const stopped = await host.call('session.stop', { appSessionId: id, reason: 'stop' });
+      report.push(`session.stop: ${JSON.stringify(stopped)}`);
+
+      // the X1 facts: create v1, then the publish's v2 (an update, as E2's was), and nothing for the refused publish
+      const artifacts = ofKind(events(), 'maws.delivery.artifact');
+      report.push(`maws.delivery.artifact: ${JSON.stringify(artifacts.map(({ action, artifactId, version, title, deliverableId }) => ({ action, artifactId, version, title, deliverableId })))}`);
+      expect(artifacts.map((e) => [e.action, e.artifactId, e.version, e.title])).toEqual([['create', 'dash', 1, 'Dashboard'], ['update', 'dash', 2, 'Dashboard']]);
+      const deliverableId = artifacts[0]!.deliverableId;
+      expect(artifacts[1]!.deliverableId).toBe(deliverableId);
+
+      // the screenshot's answer, as the host wrote it: the image block first, then the result's JSON
+      const rows = readJournal(journalPath);
+      const shot = ofKind(events(), 'tool.use').find((e) => e.toolName === 'mcp__maws__artifact_screenshot');
+      expect(shot, 'the model called artifact_screenshot').toBeDefined();
+      const callRow = rows.find((r) => r.direction === 'in' && (r.frame as { request?: { subtype?: string; message?: { method?: string; params?: { name?: string } } } }).request?.message?.params?.name === 'artifact_screenshot');
+      const answer = mcpResponseOf(rows, (callRow!.frame as { request_id: string }).request_id)!;
+      expect(answer.result.content.map((b) => b.type)).toEqual(['image', 'text']);
+      expect(answer.result.content[0]).toEqual({ type: 'image', data: GREEN_SQUARE_PNG, mimeType: 'image/png' });
+      expect(JSON.parse(answer.result.content[1]!.text!)).toMatchObject({ status: 'captured', id: 'dash', deliverableId, title: 'Dashboard', version: 1, width: 64, height: 64, consoleErrors: [] });
+
+      // the refused publish, as the model read it
+      const nope = ofKind(events(), 'tool.use').find((e) => e.toolName === 'mcp__maws__artifact_publish' && (e.input as { artifact?: string }).artifact === 'nope');
+      expect(nope, 'the model called artifact_publish for "nope"').toBeDefined();
+      const refused = ofKind(events(), 'tool.result').find((e) => e.toolUseId === nope!.toolUseId)!;
+      expect(refused.isError).toBe(true);
+      expect(textOf(refused.content)).toContain(TOOL_ERRORS.noArtifact('artifact_publish', 'nope'));
+
+      // the store (P3-L M6b: the X12 mirror retired): the artifact `deliverableId` names has two versions, the first
+      // from the agent's file, the second published inline
+      const pages = documents.store.listVersions(deliverableId).map((v) => readFileSync(documents.store.contentRef(deliverableId, v.seq).path, 'utf8'));
+      expect(pages).toHaveLength(2);
+      expect(pages[0]).toBe(readFileSync(join(repo, 'dashboard.html'), 'utf8'));
+      expect(pages[1]).not.toBe(pages[0]);
+      expect(pages[1]).toMatch(/blue/i);
+      report.push(`artifact ${deliverableId}: ${pages.length} versions`);
+
+      // the reply: the colour the picture shows (green, which the prompt never names), the one artifact listed, the error
+      expect(ended.resultText).toMatch(/green/i);
+      expect(ended.resultText).toMatch(/\b1\b/);
+      // counting "the first six words", the model may drop the quotes (both recordings did: `green 2 artifact_update no
+      // artifact nope in`)
+      expect(ended.resultText).toMatch(/no artifact "?nope"?/);
+    } finally {
+      stopAnswering();
+      documents.close();
+      await closeSession(host, g, {
+        appSessionId: id, journalPath, scenario: SCENARIO,
+        provenance: { charter: 'docs/charter.md', child: 'E2', pin: PIN, document: 'docs/doperpowers/plans/2026-10-05-p1-extension.md', executionDocument: 'docs/doperpowers/plans/2026-10-06-e2-deliverables.md' },
+        transcript: { name: `${SCENARIO}-transcript`, engineSessionId: spec.sessionId! },
+      }, (line) => report.push(line));
+    }
+  }, CASE_MS);
+});

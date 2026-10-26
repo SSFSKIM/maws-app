@@ -1,0 +1,35 @@
+// X2 `browser.*` names without their schemas, which the preload bridges (`../names.ts`). Exactly the keys of
+// `../schema/browser.ts`, pinned at compile time in `../schema.ts` and per namespace in `../schema.test.ts`.
+export const commands = [
+  'browser.tabs.list', 'browser.tabs.open', 'browser.tabs.close', 'browser.tabs.select', 'browser.tabs.navigate', 'browser.tabs.zoom',
+  'browser.tabs.find', 'browser.tabs.dismiss', 'browser.tabs.devtools', 'browser.tabs.revealDownload', 'browser.view.place',
+  'browser.view.cover', 'browser.control.handBack', 'browser.history.suggest', 'browser.profiles.list',
+  // E4d start
+  'browser.comment.set',
+  // E4d end
+  // E4b start
+  'browser.import.profiles', 'browser.import.chooseUserData', 'browser.import.inspect', 'browser.import.discard', 'browser.import.start',
+  'browser.import.cancel', 'browser.import.list', 'browser.import.remove', 'browser.import.setExtension',
+  // E4b end
+  'browser.agent.activities.list', // E13
+  // cua #90 start
+  'browser.bookmarks.tree', 'browser.bookmarks.sync', 'browser.bookmarks.open', 'browser.bookmarks.menu', 'browser.bookmarks.favicons',
+  'browser.extensions.actions', 'browser.extensions.action.click', 'browser.extensions.action.options', 'browser.extensions.action.menu', 'browser.extensions.puzzle',
+  // cua #90 end
+  'browser.view.capture', // P3-G
+] as const;
+
+export const events = [
+  'browser.tabs.changed', 'browser.view.covered', 'browser.control.changed', 'browser.chrome.command', 'browser.download.refused', 'browser.notice',
+  // E4d start
+  'browser.comment.changed', 'browser.comment.picked',
+  // E4d end
+  // E4b start
+  'browser.import.progress', 'browser.import.finished', 'browser.import.changed',
+  // E4b end
+  'browser.agent.acting', // E4c (removed with the browser tools, restored by E13 for cua's leases: P1 A-54)
+  'browser.agent.activity', // E13
+  // cua #90 start
+  'browser.bookmarks.changed', 'browser.extensions.actions.changed', 'browser.extensions.popup', 'browser.extensions.reveal',
+  // cua #90 end
+] as const;

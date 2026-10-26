@@ -1,0 +1,125 @@
+@import "tailwindcss";
+@import "./tokens.css";
+
+/* C6: Streamdown and its plugins ship Tailwind class names in their dist; Tailwind must scan them (hoisted node_modules). */
+@source "../../../../node_modules/streamdown/dist/*.js";
+@source "../../../../node_modules/@streamdown/math/dist/*.js";
+@source "../../../../node_modules/@streamdown/mermaid/dist/*.js";
+/* C6: Tailwind's `dark:` variant follows MAWS's theme attribute (C1's signal), so Streamdown's dual themes switch with it. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+/* end C6 */
+
+/* Tailwind's default palette and scales are removed: palette classes compile to nothing and only X7 tokens exist. */
+@theme {
+  --color-*: initial;
+  --font-*: initial;
+  --text-*: initial;
+  --radius-*: initial;
+  --spacing: 4px;
+}
+
+/* Every X7 token as the utility of the same name (bg-bg-raised, text-fg-muted, border-border-strong, font-mono,
+   text-ui, rounded-md for --radius, ...). `inline` because the values change per data-theme.
+   Tailwind also emits the same-named entries (--font-ui, --text-ui, --radius-sm, ...) into `@layer theme` as
+   self-references; tokens.css must stay unlayered so its declarations win the cascade over them. */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-raised: var(--bg-raised);
+  --color-bg-overlay: var(--bg-overlay);
+  --color-bg-hover: var(--bg-hover);
+  --color-bg-active: var(--bg-active);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-faint: var(--fg-faint);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+  --color-diff-add-bg: var(--diff-add-bg);
+  --color-diff-del-bg: var(--diff-del-bg);
+  /* P3-B: the author colours (bg-author-3, text-author-3, ...) */
+  --color-author-1: var(--author-1);
+  --color-author-2: var(--author-2);
+  --color-author-3: var(--author-3);
+  --color-author-4: var(--author-4);
+  --color-author-5: var(--author-5);
+  --color-author-6: var(--author-6);
+  --color-author-7: var(--author-7);
+  --color-author-8: var(--author-8);
+
+  --font-ui: var(--font-ui);
+  --font-prose: var(--font-prose);
+  --font-mono: var(--font-mono);
+
+  --text-ui: var(--text-ui);
+  --text-ui-sm: var(--text-ui-sm);
+  --text-prose: var(--text-prose);
+  --text-code: var(--text-code);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius);
+  --radius-lg: var(--radius-lg);
+  --radius-2xl: var(--radius-2xl); /* W2 */
+  --shadow-composer: var(--shadow-composer); /* W2 */
+  --shadow-float: var(--shadow-float); /* W5: the floating Overview */
+  --shadow-strip: var(--shadow-strip); /* P2-F L148: the comment card in the browser's strip */
+
+  /* C6: the shadcn names Streamdown's dist paints with, bridged to X7 tokens (--color-border already maps --border). */
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
+  --color-muted: var(--bg-raised);
+  --color-muted-foreground: var(--fg-muted);
+  --color-primary: var(--accent);
+  --color-primary-foreground: var(--bg);
+  --color-sidebar: var(--bg-raised); /* code, table and diagram frames and their copy/fullscreen toolbar (bg-sidebar, border-sidebar) */
+  --radius-xl: var(--radius-lg);
+  --text-sm: var(--text-ui);
+  --text-xs: var(--text-ui-sm);
+  /* end C6 */
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  /* E11 F2b (plan 2.1): the window is the workstation's viewport, never a scroller; the panes, the transcript and the
+     lists scroll inside it. The body and #root clip rather than hide, so nothing they hold can grow the document's
+     scrollable area for a scrollIntoView to move. */
+  html {
+    overflow: hidden;
+  }
+
+  body,
+  #root {
+    overflow: clip;
+  }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-ui);
+    font-size: var(--text-ui);
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* W2 (B1, C1; charter §5.4 and §6 as amended 2026-10-01): the one column the transcript's rows and the composer frame
+   share, as Codex's thread column does: --measure wide with --measure-pad inside, centred; on a pane narrower than
+   that, the pane's width. */
+@layer components {
+  .thread-column {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: var(--measure);
+    margin-inline: auto;
+    padding-inline: var(--measure-pad);
+  }
+}

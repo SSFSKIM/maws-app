@@ -1,0 +1,111 @@
+/* X7 theme tokens: the only file in the renderer that holds literal values.
+   Names are binding (mockups/tokens.css); values are advisory (charter §6, §7.5).
+   Light is the default: colours from mockups/tokens-light.css, structure from mockups/tokens.css.
+   Dark takes the colour values of mockups/tokens.css. */
+
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #faf9f6; --bg-raised: #ffffff; --bg-overlay: #ffffff; --bg-hover: rgba(20,18,14,0.05); --bg-active: rgba(20,18,14,0.08);
+  --border: rgba(20,18,14,0.10); --border-strong: rgba(20,18,14,0.18);
+  --fg: #1f1e1b; --fg-muted: rgba(31,30,27,0.62); --fg-faint: rgba(31,30,27,0.42);
+  /* W2 (B2): the user bubble's ground, Codex's: the text colour at 5 percent, so it follows the theme's --fg */
+  --bg-user-message: color-mix(in oklab, var(--fg) 5%, transparent);
+  --accent: #c9663f; --accent-soft: rgba(201,102,63,0.14);
+  --success: #1f8f55; --warning: #b86a1a; --danger: #c93b3b; --info: #3b6fd1;
+  --diff-add-bg: rgba(31,143,85,0.14); --diff-del-bg: rgba(201,59,59,0.12);
+  /* W8 (T1): the light sweep over a live thinking label, Codex's `#ffffffbf` in either theme (its cadenced shimmer,
+     chatgpt-26.928.40906 css/app-initial-2e28cd4bbe72.css:8681) */
+  --shimmer-highlight: rgba(255,255,255,0.75);
+
+  --font-ui: -apple-system, "SF Pro Text", Inter, system-ui, sans-serif;
+  --font-prose: -apple-system, "SF Pro Text", Inter, system-ui, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", Menlo, monospace;
+  /* W2 (charter §6 and D-4 as amended 2026-10-01): Codex's measured scale, 14px prose at 1.625 (a 22.75px pitch), 12px
+     code, 13px chrome. --measure is the column the transcript's rows and the composer frame share, in px so it no longer
+     follows the font; --measure-pad sits inside it (768 − 2 × 16 = 736px of text); a wide table or code block may
+     break out to --measure-wide. `appearance.transcriptWidth` overrides --measure on the root
+     (settings-tab/transcript-width.ts). */
+  --text-ui: 13px; --text-ui-sm: 12px; --text-prose: 14px; --lh-prose: 1.625; --text-code: 12px;
+  --measure: 768px; --measure-pad: 16px; --measure-wide: calc(var(--measure) + 128px);
+  --radius-sm: 6px; --radius: 10px; --radius-lg: 14px; --space: 4px;
+  /* W2 (B2, C1): Codex's 22px corner, shared by the user bubble and the composer box; the box's faint shadow */
+  --radius-2xl: 22px;
+  --shadow-composer: 0 0 0 1px #0000000a, 0 2px 8px 0 #0000000a, 0 4px 80px 8px #00000006;
+  --row-h: 30px; --toolbar-h: 44px; --sidebar-w: 240px; --panel-w: 380px;
+  /* W5: the floating Overview's lift off the main area */
+  --shadow-float: 0 0 0 1px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.10), 0 24px 64px rgba(0,0,0,0.08);
+  /* P2-F L148: the comment card in the browser's strip, which clips at its 8 px margin: every layer reaches at most 8 px */
+  --shadow-strip: 0 0 0 1px rgba(0,0,0,0.04), 0 2px 6px rgba(0,0,0,0.08);
+
+  /* Terminal (C9, X7 extension; values advisory): a VS Code-light-derived readable set on a white ground. */
+  --term-bg: var(--bg-raised); --term-fg: var(--fg); --term-cursor: #c9663f; --term-cursor-fg: #ffffff; --term-selection: rgba(201,102,63,0.25);
+  --term-ansi-black: #1f1e1b; --term-ansi-red: #cd3131; --term-ansi-green: #00795b; --term-ansi-yellow: #949800;
+  --term-ansi-blue: #0451a5; --term-ansi-magenta: #bc05bc; --term-ansi-cyan: #0598bc; --term-ansi-white: #555555;
+  --term-ansi-bright-black: #666666; --term-ansi-bright-red: #cd3131; --term-ansi-bright-green: #14ce14; --term-ansi-bright-yellow: #b5ba00;
+  --term-ansi-bright-blue: #0451a5; --term-ansi-bright-magenta: #bc05bc; --term-ansi-bright-cyan: #0598bc; --term-ansi-bright-white: #a5a5a5;
+
+  /* C8c start: the file viewer's syntax colours (X7 extension; names binding, values advisory): GitHub light's, as
+     C6's shiki theme renders the transcript's code blocks. */
+  --code-keyword: #cf222e; --code-string: #0a3069; --code-comment: #6e7781; --code-number: #0550ae; --code-type: #953800;
+  --code-function: #8250df; --code-variable: #1f2328; --code-property: #0550ae; --code-operator: #cf222e; --code-punctuation: #1f2328;
+  --code-meta: #6e7781; --code-invalid: #82071e;
+  --code-gutter-fg: rgba(31,30,27,0.36); --code-line-active-bg: rgba(20,18,14,0.035); --code-selection-bg: rgba(201,102,63,0.20);
+  /* C8c end */
+  /* E5 start: the conflict-marker view's three sections (X7 extension; names binding, values advisory): mine in the
+     accent's tint, theirs in the added green's, the base neutral, each read beside --diff-*-bg and --accent-soft. */
+  --code-conflict-mine-bg: rgba(201,102,63,0.12); --code-conflict-theirs-bg: rgba(31,143,85,0.12); --code-conflict-base-bg: rgba(20,18,14,0.06);
+  /* E5 end */
+  /* P3-G (§D4.2): Mark-up's five inks (Claude's annotate inks). They mark content, not chrome, so they are the same in
+     both themes and the dark block leaves them be. */
+  --markup-ink-red: #E03131; --markup-ink-blue: #1971C2; --markup-ink-green: #2F9E44; --markup-ink-black: #1F1E1D; --markup-ink-white: #FFFFFF;
+  /* P3-B start: the author colours (the ledger's §7, B's): eight hues at one lightness, each readable as a 2 px underline
+     and as a 12 % ground behind text; an actor's colour is `actorDisplay(actor).color` (src/shared/artifacts/actor.ts).
+     App tokens, not a design system's: they follow the app theme by design. */
+  --author-1: oklch(0.56 0.15 25); --author-2: oklch(0.56 0.15 70); --author-3: oklch(0.56 0.15 125); --author-4: oklch(0.56 0.15 160);
+  --author-5: oklch(0.56 0.15 200); --author-6: oklch(0.56 0.15 245); --author-7: oklch(0.56 0.15 290); --author-8: oklch(0.56 0.15 335);
+  /* P3-B end */
+}
+
+/* Codex narrows the light composer elevation only below a 640px window. */
+@media (width < 640px) {
+  :root,
+  [data-theme="light"] {
+    --shadow-composer: 0 0 0 1px #0000000a, 0 2px 8px 0 #0000000a, 0 4px 40px 8px #00000006;
+  }
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #131313; --bg-raised: #1a1a1a; --bg-overlay: #222222; --bg-hover: rgba(255,255,255,0.05); --bg-active: rgba(255,255,255,0.08);
+  --border: rgba(255,255,255,0.09); --border-strong: rgba(255,255,255,0.16);
+  --fg: #e8e6e3; --fg-muted: rgba(232,230,227,0.62); --fg-faint: rgba(232,230,227,0.40);
+  --accent: #d97757; --accent-soft: rgba(217,119,87,0.16);
+  --success: #4cc38a; --warning: #f0a35e; --danger: #f26d6d; --info: #7aa2f7;
+  --diff-add-bg: rgba(76,195,138,0.16); --diff-del-bg: rgba(242,109,109,0.16);
+  /* W2 (C1): Codex's dark composer edge, a faint inner light instead of a shadow */
+  --shadow-composer: inset 0 0 1px rgba(255,255,255,0.2);
+  --shadow-float: inset 0 0 1px rgba(255,255,255,0.2), 0 8px 24px rgba(0,0,0,0.45), 0 24px 64px rgba(0,0,0,0.35);
+  --shadow-strip: inset 0 0 1px rgba(255,255,255,0.2), 0 2px 6px rgba(0,0,0,0.45); /* P2-F L148 */
+
+  /* Terminal (C9): the same family on the raised dark ground. */
+  --term-bg: var(--bg-raised); --term-fg: var(--fg); --term-cursor: #d97757; --term-cursor-fg: #1a1a1a; --term-selection: rgba(217,119,87,0.30);
+  --term-ansi-black: #1a1a1a; --term-ansi-red: #f26d6d; --term-ansi-green: #4cc38a; --term-ansi-yellow: #f0c674;
+  --term-ansi-blue: #7aa2f7; --term-ansi-magenta: #d98ee6; --term-ansi-cyan: #5fd7e5; --term-ansi-white: #c8c6c3;
+  --term-ansi-bright-black: #6b6966; --term-ansi-bright-red: #ff8a8a; --term-ansi-bright-green: #6ee7a8; --term-ansi-bright-yellow: #ffd88a;
+  --term-ansi-bright-blue: #9cbaff; --term-ansi-bright-magenta: #e9a8f5; --term-ansi-bright-cyan: #8ae9f5; --term-ansi-bright-white: #f2f0ed;
+
+  /* C8c start: GitHub dark's syntax colours on the raised dark ground. */
+  --code-keyword: #ff7b72; --code-string: #a5d6ff; --code-comment: #8b949e; --code-number: #79c0ff; --code-type: #ffa657;
+  --code-function: #d2a8ff; --code-variable: #e8e6e3; --code-property: #79c0ff; --code-operator: #ff7b72; --code-punctuation: #c8c6c3;
+  --code-meta: #8b949e; --code-invalid: #ffa198;
+  --code-gutter-fg: rgba(232,230,227,0.34); --code-line-active-bg: rgba(255,255,255,0.04); --code-selection-bg: rgba(217,119,87,0.28);
+  /* C8c end */
+  /* E5 start: the same roles on the dark ground. */
+  --code-conflict-mine-bg: rgba(217,119,87,0.15); --code-conflict-theirs-bg: rgba(76,195,138,0.13); --code-conflict-base-bg: rgba(255,255,255,0.06);
+  /* E5 end */
+  /* P3-B start: the author colours on the dark ground, lighter at the same hues. */
+  --author-1: oklch(0.76 0.13 25); --author-2: oklch(0.76 0.13 70); --author-3: oklch(0.76 0.13 125); --author-4: oklch(0.76 0.13 160);
+  --author-5: oklch(0.76 0.13 200); --author-6: oklch(0.76 0.13 245); --author-7: oklch(0.76 0.13 290); --author-8: oklch(0.76 0.13 335);
+  /* P3-B end */
+}

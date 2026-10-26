@@ -1,0 +1,1193 @@
+/* The document editor's chrome (M3 of docs/doperpowers/plans/2026-10-12-p3-b-documents.md): the tab strip, the toolbar,
+   menus, the find bar, find's highlights, the other replicas' cursors, and (M4) the comment highlights and the threads
+   rail, and (M5) the version history rail, the preview's bar and its change marks, Show editors, the new-changes pill,
+   the restore banner and an agent's editing blocks. These are the app's UI around and over the page, so they read the
+   app's tokens directly (the page itself is theme.css's, in the design system's; the author colours are app tokens by
+   design, D3). No literal colour (theme.dom.test.tsx). */
+
+.doc-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--text-ui);
+}
+.doc-editor-body {
+  position: relative; /* P3-F1: the drawer below */
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.doc-tab-editor {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+/* the page's scroll box, and over it the comment card's host (absolute, filling the frame; M4) */
+.doc-page-frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+/* the page, in the design system's scope when the shell gives one (D's DesignSystemScope, M8), fills the frame */
+.doc-page-scope,
+.doc-page-scope > :not(.ds-doc) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.doc-page-scope .ds-doc {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.doc-editor-loading {
+  padding: calc(var(--space) * 6);
+  color: var(--fg-muted);
+}
+
+/* ── tabs ── */
+.doc-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--space);
+  padding: var(--space) calc(var(--space) * 2);
+  border-bottom: 1px solid var(--border);
+}
+.doc-tablist {
+  display: flex;
+  gap: var(--space);
+  overflow-x: auto;
+  min-width: 0;
+}
+.doc-tab,
+.doc-tab-title {
+  font: inherit;
+  color: var(--fg-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: var(--space) calc(var(--space) * 3);
+  white-space: nowrap;
+}
+/* P3-F (the owner's observation 3): a tab holds its title and its ×, Delete, shown on hover and on the selected tab */
+.doc-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space);
+  cursor: default;
+  user-select: none;
+}
+.doc-tab:hover {
+  background: var(--bg-hover);
+}
+.doc-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.doc-tab[aria-selected="true"] {
+  color: var(--fg);
+  background: var(--bg-active);
+}
+.doc-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(var(--space) * 4);
+  height: calc(var(--space) * 4);
+  margin-right: calc(var(--space) * -1.5);
+  padding: 0;
+  color: var(--fg-muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  visibility: hidden;
+}
+.doc-tab:hover .doc-tab-close,
+.doc-tab:focus-visible .doc-tab-close,
+.doc-tab[aria-selected="true"] .doc-tab-close {
+  visibility: visible;
+}
+/* P4-B1 (the prior art's Z6): a tab with open comment threads, in the passages' highlight colour */
+.doc-tab-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  margin-left: var(--space);
+  border-radius: 50%;
+  background: var(--warning);
+  vertical-align: middle;
+}
+.doc-tab-close:hover {
+  color: var(--fg);
+  background: var(--bg-active);
+}
+.doc-tab-close svg {
+  width: calc(var(--space) * 2.5);
+  height: calc(var(--space) * 2.5);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+.doc-tab-title {
+  color: var(--fg);
+  border-color: var(--border-strong);
+  background: var(--bg-raised);
+}
+.doc-menu-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+/* ── toolbar ── */
+.doc-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding: var(--space) calc(var(--space) * 2);
+  border-bottom: 1px solid var(--border);
+}
+.doc-tool,
+.doc-icon-button {
+  font: inherit;
+  min-width: calc(var(--space) * 7);
+  height: calc(var(--space) * 7);
+  padding: 0 calc(var(--space) * 1.5);
+  color: var(--fg);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+}
+.doc-tool:hover:not(:disabled),
+.doc-icon-button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.doc-tool[data-active] {
+  background: var(--bg-active);
+  color: var(--accent);
+}
+.doc-tool:disabled,
+.doc-icon-button:disabled {
+  color: var(--fg-faint);
+}
+.doc-toolbar-select {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  height: calc(var(--space) * 7);
+}
+.doc-toolbar-separator {
+  width: 1px;
+  align-self: stretch;
+  margin: var(--space) var(--space);
+  background: var(--border);
+}
+.doc-toolbar-spacer {
+  flex: 1;
+}
+.doc-toolbar-error {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space);
+  margin-left: var(--space);
+  font-size: var(--text-ui-sm);
+  color: var(--danger);
+}
+
+/* P3-F1 (toolbar-strip.ts): the formatting toolbar is one row. Its tools scroll in a strip, faded at an edge that has
+   more (sticky ends, not a mask, which would hide the strip's menus); the comment, history and find controls follow it
+   (scrolling too in the narrowest panel). Tools and controls sit where they did in the wrapping row, a focus ring's 2 px
+   kept inside each scrolling box. A menu in the strip is positioned by the toolbar, so the strip does not clip it: under
+   its button (the toolbar's --doc-popover-left). */
+.doc-format-toolbar {
+  position: relative;
+  flex-wrap: nowrap;
+  padding-block: 0;
+}
+.doc-toolbar-tools,
+.doc-toolbar-end {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding-block: var(--space);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.doc-toolbar-tools {
+  flex: 1 1 0;
+  min-width: calc(var(--space) * 21);
+  margin-left: -2px; /* its first gap, before the start's fade, is the ring's room */
+}
+.doc-toolbar-end {
+  flex: 0 1 auto;
+  margin-right: -2px;
+  padding-inline: 2px;
+}
+/* each control at its own width, its label on one line: the row scrolls rather than any control narrowing (a shrunk
+   "Insert ▾" or "</>" wrapped inside its fixed-height button) */
+.doc-toolbar-tools > *,
+.doc-toolbar-end > * {
+  flex-shrink: 0;
+}
+.doc-format-toolbar .doc-tool,
+.doc-format-toolbar .doc-toolbar-select,
+.doc-format-toolbar .doc-toolbar-error {
+  white-space: nowrap;
+}
+.doc-toolbar-tools::before,
+.doc-toolbar-tools::after {
+  content: '';
+  position: sticky;
+  flex: none;
+  align-self: stretch;
+  width: calc(var(--space) * 6);
+  pointer-events: none;
+  opacity: 0;
+}
+.doc-toolbar-tools::before {
+  left: 0;
+  margin-right: calc(var(--space) * -6);
+  background: linear-gradient(to left, transparent, var(--bg));
+}
+.doc-toolbar-tools::after {
+  right: 0;
+  margin-left: calc(var(--space) * -6);
+  background: linear-gradient(to right, transparent, var(--bg));
+}
+.doc-toolbar-tools[data-overflow='start']::before,
+.doc-toolbar-tools[data-overflow='both']::before,
+.doc-toolbar-tools[data-overflow='end']::after,
+.doc-toolbar-tools[data-overflow='both']::after {
+  opacity: 1;
+}
+.doc-toolbar-tools .doc-menu-anchor {
+  position: static;
+}
+.doc-toolbar-tools .doc-menu,
+.doc-toolbar-tools .doc-popover {
+  top: 100%;
+  left: var(--doc-popover-left, 0);
+}
+
+/* ── menus and popovers ── */
+.doc-menu,
+.doc-popover {
+  position: absolute;
+  top: calc(100% + var(--space));
+  left: 0;
+  z-index: 20;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-float);
+  padding: var(--space);
+}
+/* a tab's context menu (Radix, placed at the pointer) and the question before a tab with content is deleted (P3-F) */
+.doc-tab-menu {
+  z-index: 50;
+  min-width: calc(var(--space) * 40);
+  padding: var(--space);
+  color: var(--fg);
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-float);
+  font-family: var(--font-ui);
+  font-size: var(--text-ui);
+}
+.doc-tab-menu-item {
+  padding: calc(var(--space) * 1.5) calc(var(--space) * 2);
+  border-radius: var(--radius-sm);
+  outline: none;
+  cursor: default;
+  user-select: none;
+}
+.doc-tab-menu-item[data-highlighted] {
+  background: var(--bg-hover);
+}
+.doc-tab-menu-item[data-danger]:not([data-disabled]) {
+  color: var(--danger);
+}
+.doc-tab-menu-item[data-disabled] {
+  color: var(--fg-faint);
+}
+.doc-tab-menu-separator {
+  height: 1px;
+  margin: var(--space) 0;
+  background: var(--border);
+}
+.doc-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: var(--bg);
+  opacity: 0.6;
+}
+.doc-confirm {
+  position: fixed;
+  top: 24%;
+  left: 50%;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) * 3);
+  width: min(calc(var(--space) * 110), 90vw);
+  padding: calc(var(--space) * 4);
+  color: var(--fg);
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-float);
+  font-family: var(--font-ui);
+  font-size: var(--text-ui);
+  transform: translateX(-50%);
+}
+.doc-confirm-title {
+  margin: 0;
+  font-size: var(--text-ui);
+  font-weight: 600;
+}
+.doc-confirm-description {
+  margin: 0;
+  color: var(--fg-muted);
+}
+.doc-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: calc(var(--space) * 2);
+}
+.doc-confirm-button {
+  font: inherit;
+  padding: calc(var(--space) * 0.5) calc(var(--space) * 2);
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.doc-confirm-button:hover {
+  background: var(--bg-hover);
+}
+.doc-confirm-button[data-danger] {
+  color: var(--bg);
+  background: var(--danger);
+  border-color: transparent;
+}
+.doc-confirm-button[data-danger]:hover {
+  opacity: 0.9;
+  background: var(--danger);
+}
+.doc-menu {
+  display: flex;
+  flex-direction: column;
+  min-width: calc(var(--space) * 40);
+}
+.doc-menu [role="menuitem"] {
+  font: inherit;
+  text-align: left;
+  color: var(--fg);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: calc(var(--space) * 1.5) calc(var(--space) * 2);
+}
+.doc-menu [role="menuitem"]:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.doc-menu [role="menuitem"]:disabled {
+  color: var(--fg-faint);
+}
+.doc-popover {
+  display: flex;
+  gap: var(--space);
+  align-items: center;
+}
+.doc-popover input,
+.doc-find input {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space) calc(var(--space) * 2);
+}
+.doc-popover button {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg-hover);
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: var(--space) calc(var(--space) * 2);
+}
+
+/* ── find ── */
+.doc-find {
+  display: flex;
+  align-items: center;
+  gap: var(--space);
+  padding: var(--space) calc(var(--space) * 2);
+  border-bottom: 1px solid var(--border);
+}
+.doc-find-count {
+  min-width: calc(var(--space) * 16);
+  color: var(--fg-muted);
+  font-size: var(--text-ui-sm);
+}
+.ds-doc .find-match {
+  background: var(--accent-soft);
+}
+.ds-doc .find-match-current {
+  background: var(--accent);
+  color: var(--bg-raised);
+}
+
+/* ── the other replicas' cursors (@y/prosemirror's cursor plugin; --user-color is an author colour) ── */
+.ds-doc .ProseMirror-yjs-cursor {
+  position: relative;
+  margin: 0 -1px;
+  border-left: 2px solid var(--user-color);
+  pointer-events: none;
+  word-break: normal;
+}
+.ds-doc .ProseMirror-yjs-cursor > div {
+  position: absolute;
+  top: -1.4em;
+  left: -2px;
+  font-family: var(--font-ui);
+  font-size: var(--text-ui-sm);
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--bg-raised);
+  background: var(--user-color);
+  border-radius: var(--radius-sm) var(--radius-sm) var(--radius-sm) 0;
+  padding: 0 var(--space);
+}
+.ds-doc .ProseMirror-yjs-selection {
+  background: color-mix(in oklab, var(--user-color) 20%, transparent);
+}
+
+/* ── comments (M4): the open threads' passages, the active one, and the threads rail ── */
+/* P4-B1: a pale tint for every open passage and a strong one for the active thread's, as Docs draws them (LC-1 item 2,
+   docs/doperpowers/evidence/p4/lc1/lc1-docs-margin.md): with the active card no longer shifted, the passage carries
+   more of which thread is active */
+.ds-doc .comment {
+  background: color-mix(in oklab, var(--warning) 14%, transparent);
+  border-bottom: 2px solid color-mix(in oklab, var(--warning) 50%, transparent);
+}
+.ds-doc .comment.comment-active {
+  background: color-mix(in oklab, var(--warning) 45%, transparent);
+  border-bottom-color: var(--warning);
+}
+/* P3-E (E2 M4): a block commented whole (a dashboard's view) is outlined rather than tinted, its content kept legible */
+.ds-doc .doc-atom.comment {
+  background: none;
+  border-bottom: 0;
+  outline: 2px solid color-mix(in oklab, var(--warning) 60%, transparent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.ds-doc .doc-atom.comment.comment-active {
+  background: none;
+  outline-color: var(--warning);
+}
+/* P4-B1: View › Comments › Hide draws the passages plain, as Docs' Hide does (LC-1 item 7); Minimize keeps them. The
+   view is the tab editor's (`data-comments-view`, DocumentEditor.tsx); only colours change, so no line moves */
+[data-comments-view='hide'] .ds-doc .comment,
+[data-comments-view='hide'] .ds-doc .comment.comment-active {
+  background: none;
+  border-bottom-color: transparent;
+  outline-color: transparent;
+}
+.doc-rail {
+  display: flex;
+  flex-direction: column;
+  width: calc(var(--space) * 76);
+  flex-shrink: 0;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+}
+/* UX2: History and All comments float under the document's own toolbar, not in a dedicated full-height column.
+   A wide page shifts only by the card's width and gutters (at most 40%, preserving the 420 px page floor at 720 px).
+   A narrow body keeps its whole page width beneath the card. With no card open there is no reserved space. */
+.doc-editor-body > .doc-rail {
+  position: absolute;
+  top: calc(var(--doc-drawer-top, 0px) + var(--space) * 2);
+  right: calc(var(--space) * 2);
+  z-index: 5;
+  width: calc(var(--space) * 76);
+  max-width: calc(100% - var(--space) * 4);
+  max-height: calc(100% - var(--doc-drawer-top, 0px) - var(--space) * 4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-float);
+  overflow: hidden;
+}
+.doc-editor-body[data-rail-layout='beside'] > .doc-rail {
+  max-width: calc(40% - var(--space) * 4);
+}
+.doc-editor-body[data-rail-layout='beside'] > .doc-tab-editor .doc-page-frame {
+  margin-right: min(calc(var(--space) * 80), 40%);
+}
+.doc-rail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space) calc(var(--space) * 3);
+  border-bottom: 1px solid var(--border);
+}
+.doc-rail-title {
+  margin: 0;
+  font-size: var(--text-ui);
+  font-weight: 600;
+}
+.doc-rail-body {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) * 2);
+  padding: calc(var(--space) * 2);
+}
+.doc-rail-empty {
+  margin: 0;
+  color: var(--fg-muted);
+}
+.doc-rail-resolved {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) * 2);
+}
+.doc-rail-section {
+  font: inherit;
+  text-align: left;
+  color: var(--fg-muted);
+  background: transparent;
+  border: 0;
+  padding: var(--space) 0;
+}
+/* P4-B1: a thread in the panel is X36's card, styled by src/artifacts/comments/comments.css; the panel's filters: */
+.doc-rail-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space) calc(var(--space) * 2);
+  padding: calc(var(--space) * 2) calc(var(--space) * 3);
+  border-bottom: 1px solid var(--border);
+}
+.doc-rail-segments {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.doc-rail-segment {
+  position: relative;
+  padding: 2px calc(var(--space) * 2);
+  font-size: var(--text-ui-sm);
+  color: var(--fg-muted);
+  cursor: default;
+}
+.doc-rail-segment + .doc-rail-segment {
+  border-left: 1px solid var(--border);
+}
+.doc-rail-segment:has(input:checked) {
+  color: var(--fg);
+  background: var(--bg-active);
+}
+.doc-rail-segment:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.doc-rail-segment input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.doc-rail-search {
+  flex: 1 0 100%;
+  min-width: 0;
+  font: inherit;
+  font-size: var(--text-ui-sm);
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space) calc(var(--space) * 2);
+}
+
+/* ── awareness (M5): the blocks an agent is editing, outlined in its colour and named ── */
+.ds-doc [data-agent-editing] {
+  position: relative;
+  outline: 2px solid var(--doc-presence);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.ds-doc [data-agent-editing]::after {
+  content: attr(data-agent-editing);
+  position: absolute;
+  top: -1.6em;
+  right: 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-ui-sm);
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--bg-raised);
+  background: var(--doc-presence);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space);
+  pointer-events: none;
+}
+
+/* ── the provisional layer (P4-A2, X35): the agent's batch as it is written, in its colour (--doc-presence) and named,
+   never inside the block the person composes in (provisional.ts). Nothing changes a line box: the quoted passage and
+   the streamed text are only coloured and underlined in the line, and a block's worth of text stands between blocks ── */
+.ds-doc .doc-provisional-old {
+  opacity: 0.55;
+  text-decoration: line-through 2px var(--doc-presence);
+}
+.ds-doc .doc-provisional-text {
+  color: var(--doc-presence);
+  text-decoration: underline 1px color-mix(in oklab, var(--doc-presence) 50%, transparent);
+  text-underline-offset: 3px;
+}
+.ds-doc .doc-provisional-replaced {
+  opacity: 0.55;
+}
+.ds-doc .doc-provisional-block {
+  padding-left: calc(var(--space) * 3);
+  border-left: 2px solid var(--doc-presence);
+  color: color-mix(in oklab, currentColor 78%, transparent);
+  white-space: pre-wrap;
+}
+.ds-doc .doc-provisional-block::before {
+  content: attr(data-provisional-by) " is writing…";
+  display: block;
+  width: fit-content;
+  margin-bottom: var(--space);
+  font-family: var(--font-ui);
+  font-size: var(--text-ui-sm);
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--bg-raised);
+  background: var(--doc-presence);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space);
+}
+/* a dashboard's dataset being rebound (G2's G-R7): each chart bound to it labelled at its top left, the presence
+   outline naming the agent at the opposite corner; drawn over the page, so no line moves as it comes and goes */
+.ds-doc .doc-provisional-dataset {
+  position: relative;
+}
+.ds-doc .doc-provisional-dataset::before {
+  content: attr(data-provisional-label);
+  position: absolute;
+  top: -1.6em;
+  left: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-ui);
+  font-size: var(--text-ui-sm);
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--bg-raised);
+  background: var(--doc-presence);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space);
+  pointer-events: none;
+}
+
+/* ── version history (M5): the preview's change marks, in each author's colour (--doc-author is an author colour) ── */
+.ds-doc y-del {
+  text-decoration: line-through;
+}
+.ds-doc .doc-change-ins {
+  background: color-mix(in oklab, var(--doc-author) 14%, transparent);
+  text-decoration: underline 2px var(--doc-author);
+  text-underline-offset: 3px;
+}
+.ds-doc .doc-change-del {
+  text-decoration: line-through 2px var(--doc-author);
+  opacity: 0.7;
+}
+.ds-doc .doc-change-fmt {
+  text-decoration: underline dotted 2px var(--doc-author);
+  text-underline-offset: 3px;
+}
+.ds-doc .doc-change-attrs {
+  outline: 1px dashed var(--doc-author);
+  outline-offset: 2px;
+}
+.ds-doc .doc-change-current {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: var(--radius-sm);
+}
+/* the gutter mark of a block holding a change */
+.ds-doc [data-change-block] {
+  position: relative;
+}
+.ds-doc [data-change-block]::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--space) * -4);
+  width: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--doc-author);
+}
+/* a block a move or a type change re-inserted: labelled in the right margin */
+.ds-doc [data-carry] {
+  position: relative;
+}
+.ds-doc [data-carry]::after {
+  content: attr(data-carry-label);
+  position: absolute;
+  top: 0;
+  left: 100%;
+  margin-left: calc(var(--space) * 2);
+  font-family: var(--font-ui);
+  font-size: var(--text-ui-sm);
+  font-weight: 400;
+  font-style: normal;
+  line-height: 1.6;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+/* ── version history (M5): the rail, the preview's bar, the pill, the banner, Show editors ── */
+.doc-history-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space);
+  padding: var(--space) calc(var(--space) * 2);
+  border-bottom: 1px solid var(--border);
+}
+.doc-history-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space);
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.doc-history-save {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space);
+  padding: calc(var(--space) * 2);
+  border-bottom: 1px solid var(--border);
+}
+.doc-history-save input,
+.doc-history-save textarea {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space) calc(var(--space) * 2);
+  resize: vertical;
+}
+.doc-history-save-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space);
+}
+.doc-history-status {
+  margin: 0;
+  padding: var(--space) calc(var(--space) * 3);
+  font-size: var(--text-ui-sm);
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border);
+}
+.doc-history-status[data-error] {
+  color: var(--danger);
+}
+.doc-version-day {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.doc-version-day-label {
+  margin: 0;
+  padding: var(--space) 0;
+  font-size: var(--text-ui-sm);
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+.doc-version-run {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.doc-version {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font: inherit;
+  text-align: left;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: var(--space) calc(var(--space) * 2);
+  cursor: pointer;
+}
+.doc-version:hover {
+  background: var(--bg-hover);
+}
+.doc-version[aria-pressed='true'] {
+  background: var(--bg-active);
+  border-color: var(--accent);
+}
+.doc-version-title {
+  font-weight: 600;
+}
+.doc-version-author {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space);
+  font-size: var(--text-ui-sm);
+  color: var(--fg-muted);
+}
+.doc-author-chip {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.doc-version-summary {
+  font-size: var(--text-ui-sm);
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.doc-version-fold {
+  font: inherit;
+  font-size: var(--text-ui-sm);
+  text-align: left;
+  color: var(--accent);
+  background: transparent;
+  border: 0;
+  padding: 0 calc(var(--space) * 2);
+  cursor: pointer;
+}
+.doc-history-bar {
+  background: var(--bg-raised);
+}
+.doc-history-heading {
+  font-weight: 600;
+  padding: 0 var(--space);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40ch;
+}
+.doc-history-count {
+  padding: 0 var(--space);
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.doc-history-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(var(--space) * 2);
+  padding: var(--space) calc(var(--space) * 2);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+.doc-history-confirm p {
+  margin: 0;
+}
+.doc-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(var(--space) * 2);
+  padding: var(--space) calc(var(--space) * 3);
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-soft);
+}
+.doc-pill {
+  position: absolute;
+  top: calc(var(--space) * 2);
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-2xl);
+  background: var(--accent);
+  box-shadow: var(--shadow-float);
+}
+.doc-pill-open,
+.doc-pill-retry,
+.doc-pill-dismiss {
+  font: inherit;
+  color: var(--bg-raised);
+  background: transparent;
+  border: 0;
+  padding: var(--space) calc(var(--space) * 3);
+  cursor: pointer;
+}
+.doc-pill-retry,
+.doc-pill-dismiss {
+  padding-left: 0;
+}
+.doc-history-tab {
+  padding: 0 var(--space);
+  color: var(--fg-muted);
+  white-space: nowrap;
+  border-radius: var(--radius-sm);
+}
+.doc-history-tab[data-current],
+.doc-history-bar select[data-current] {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.doc-history-tab-note {
+  padding: 0 var(--space);
+  color: var(--danger);
+  white-space: nowrap;
+}
+.doc-context-menu,
+.doc-editors {
+  position: absolute;
+  z-index: 3;
+}
+/* the list stacks under its header (a popover lays its children in a row, which squeezed the title to a word a line and
+   put the × under the pointer that chose Show editors at the corner; P3-F, sitting candidate 29): the title on one line,
+   the × at the header's far end */
+.doc-editors {
+  flex-direction: column;
+  align-items: stretch;
+  min-width: calc(var(--space) * 56);
+}
+.doc-editors-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space);
+  font-weight: 600;
+}
+.doc-editors-title {
+  white-space: nowrap;
+}
+.doc-editors-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.doc-editors-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space);
+}
+.doc-editors-empty {
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+/* the mention picker (M8): a search field and its results under Insert */
+.doc-mention-picker {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  min-width: calc(var(--space) * 64);
+}
+.doc-mention-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: calc(var(--space) * 64);
+  overflow-y: auto;
+}
+.doc-mention-option {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: calc(var(--space) * 2);
+  padding: var(--space) calc(var(--space) * 2);
+  border-radius: var(--radius-sm);
+  cursor: default;
+}
+.doc-mention-option[aria-selected="true"] {
+  background: var(--bg-hover);
+}
+.doc-mention-detail,
+.doc-mention-empty {
+  color: var(--fg-muted);
+  font-size: var(--text-ui-sm);
+}
+.doc-mention-empty {
+  padding: var(--space) calc(var(--space) * 2);
+}
+
+/* ── the margin (P4-B1, the P4 spec §4.3; MarginThreads.tsx): the shown tab's open threads as cards beside the page,
+   inside the page's scroll box as the page's flex sibling (theme.css's row), so they scroll with the text and never
+   re-lay on a scroll. The geometry is Google Docs' as LC-1 measured it (docs/doperpowers/evidence/p4/lc1/lc1-docs-margin.md,
+   items 2, 6 and 7). The column reserves the unit centred with the page (`--doc-margin-reserve`: the page gutter and the
+   least card) only while a thread or a compose card is open on the tab, else 0 and the page is centred alone; each entry
+   sits a page gutter (26 px) from the page at the drawn card's width (`--doc-margin-card`), which may run past the
+   reserve into the free space on its right, so the column never clips. Entries are absolutely positioned at the top the
+   pure layout gave them (margin-layout.ts), moved by `transform`; a move caused by an activation, an add or a resolve
+   animates (`data-animate`, Docs' 350 ms `ease`), one caused by an edit never (Docs animates those too; kept still for
+   R4), and none under reduced motion. The active card does not move sideways: it is raised (below). App chrome inside
+   the page's scope, so it names the app's own type and colour tokens again (the page's `--ds-*` would reach it
+   otherwise). ── */
+.doc-margin {
+  position: relative;
+  flex: 0 0 var(--doc-margin-reserve, 0px);
+  width: var(--doc-margin-reserve, 0px);
+  min-height: var(--doc-margin-height, 0px);
+  overflow: visible;
+  font-family: var(--font-ui);
+  font-size: var(--text-ui);
+  line-height: 1.4;
+  font-weight: 400;
+  color: var(--fg);
+  /* the icon tier hangs over the page's right padding when the side space is short (`--doc-margin-overlap`): moved by
+     `left`, so its flex footprint stays the reserve (a negative margin would shrink the centred row and shift the page) */
+  left: calc(-1 * var(--doc-margin-overlap, 0px));
+}
+.doc-margin-entry {
+  position: absolute;
+  top: 0;
+  left: var(--doc-margin-page-gutter, 26px);
+  width: var(--doc-margin-card, 282px);
+  will-change: transform;
+}
+.doc-margin[data-animate] .doc-margin-entry {
+  transition: transform 350ms ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .doc-margin[data-animate] .doc-margin-entry {
+    transition: none;
+  }
+}
+.doc-margin-entry[data-active] {
+  z-index: 2;
+}
+/* a card's state by elevation, as Docs marks it (LC-1 item 2): an inactive card flat, a grey tint of the ground; the
+   active one the floating surface with its shadow (its passage's highlight the darker one: the comments block above) */
+.doc-margin .thread-card {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--bg) 96%, var(--fg));
+}
+.doc-margin .thread-card[aria-current='true'] {
+  background: var(--bg-overlay);
+  box-shadow: var(--shadow-float);
+}
+/* the icon tier: a round icon per thread at the page gutter, laid by the same stack (LC-1 item 7: Docs merges none),
+   over the page's right padding when the column overlaps it; the active thread's card opens over its icon, reaching
+   left over the page (`.doc-margin-overlay`, right-aligned to the icon), and that overlay floats the card itself */
+.doc-margin-entry[data-icon-entry] {
+  width: var(--doc-margin-icon, 32px);
+}
+.doc-margin-icon {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--doc-margin-icon, 32px);
+  height: var(--doc-margin-icon, 32px);
+  border-radius: 50%;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  font-size: var(--text-ui-sm);
+  font-weight: 600;
+  color: var(--fg);
+  background: color-mix(in oklab, var(--warning) 36%, var(--bg-raised));
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--warning) 60%, transparent);
+  cursor: pointer;
+  will-change: transform;
+}
+.doc-margin-icon[data-active] {
+  background: var(--warning);
+  z-index: 2;
+}
+.doc-margin-overlay {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: min(var(--doc-margin-card, 282px), 80cqi);
+  z-index: 7;
+  box-shadow: var(--shadow-float);
+  border-radius: var(--radius);
+  will-change: transform;
+}
+.doc-margin-overlay .thread-card[aria-current='true'] {
+  box-shadow: none;
+}
+/* the Add comment button beside a non-empty selection (C1), at the selection head's line (LC-1 item 8 re-bases), at
+   the page gutter */
+.doc-margin-add {
+  position: absolute;
+  top: 0;
+  left: var(--doc-margin-page-gutter, 26px);
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  padding: 0;
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-float);
+  cursor: pointer;
+  z-index: 3;
+  will-change: transform;
+}
+.doc-margin-add:hover {
+  background: var(--bg-hover);
+}
+/* P4-B1: in the icon tier the button lines up with the icons where the column has room for it and is pulled back
+   inside the column where it has not: over the page's right padding when the column reserves nothing (a selection on a
+   tab with no open thread), so it never leaves a narrow scroll box (nor makes it scroll sideways), and the page does
+   not move as a selection shows it */
+.doc-margin[data-margin-tier='icons'] .doc-margin-add {
+  left: min(var(--doc-margin-page-gutter, 26px), calc(var(--doc-margin-reserve, 0px) - var(--doc-margin-gap, 10px) - 28px));
+}
+/* the compose card's entry hosts P2's card in flow (CommentCardHost's margin layout); in the icon tier the entry is
+   marked too, but its icon and overlay keep their own placing */
+.doc-margin-entry[data-compose]:not([data-icon-entry]) > * {
+  position: relative;
+}
+/* the live region (K4): announced, never seen */
+.doc-margin-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+/* the toolbar's view menu (View › Comments: Expand, Minimize, Hide) */
+.doc-menu [role='menuitemradio'][aria-checked='true']::before {
+  content: '✓ ';
+}

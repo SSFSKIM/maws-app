@@ -1,0 +1,69 @@
+# MAWS's macOS e2e groups on GitHub's hosted Macs (free on a public repository). Each job runs one group as the
+# private gate's e2e job does: the shared setup (Node 22, pnpm, .github/ci-kit.yml's brew, cask and script, the
+# frozen install), then the group's package script, which builds its out/ variant first.
+name: mac-e2e
+on:
+  workflow_dispatch:
+    inputs:
+      groups:
+        description: e2e groups, space-separated
+        type: string
+        default: document-app transcript presentations browser-chrome connectors
+      image:
+        description: the hosted runner image
+        type: string
+        default: macos-26
+permissions:
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      groups: ${{ steps.plan.outputs.groups }}
+    steps:
+      - id: plan
+        env:
+          GROUPS: ${{ inputs.groups }}
+        run: echo "groups=$(jq -cn --arg g "$GROUPS" '$g | split(" ") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
+  e2e:
+    needs: plan
+    name: e2e:${{ matrix.group }}
+    runs-on: ${{ inputs.image }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        group: ${{ fromJSON(needs.plan.outputs.groups) }}
+    env:
+      MAWS_E2E_QUIET: '1'
+      SHELL: /bin/zsh
+    steps:
+      - id: checkout
+        uses: actions/checkout@v7
+      - id: machine
+        run: |
+          echo "ci-kit desktop: $(sw_vers -productVersion) $(sysctl -n machdep.cpu.brand_string) cpus $(sysctl -n hw.ncpu) memory $(( $(sysctl -n hw.memsize) / 1073741824 )) GiB"
+          system_profiler SPDisplaysDataType 2>/dev/null | grep -E 'Resolution|Retina|Main Display' || true
+      - uses: ./.github/actions/setup
+        with:
+          e2e: 'true'
+      # A cask Homebrew installs carries the quarantine flag, and a first launch would wait on Gatekeeper's dialog on
+      # this unattended VM.
+      - run: |
+          for app in /Applications/LibreOffice.app "/Applications/Google Chrome.app"; do
+            [[ -d $app ]] && xattr -dr com.apple.quarantine "$app" 2>/dev/null && echo "unquarantined $app" || true
+          done
+      - env:
+          GROUP: ${{ matrix.group }}
+        run: |
+          export MAWS_E2E_BUILD_CACHE=$RUNNER_TEMP/maws-e2e-build MAWS_E2E_BUILD_KEY=$GITHUB_SHA
+          .github/scripts/gate-run.sh '^ +[0-9]+ (passed|failed|flaky|skipped|interrupted|did not run)|^e2e-build: ' pnpm "e2e:$GROUP"
+      - if: failure() && steps.checkout.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-${{ matrix.group }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore

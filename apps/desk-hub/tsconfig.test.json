@@ -1,0 +1,14 @@
+{
+  // The suites and the local command (local/: the stand-in for Access and its proxy), which run under Node and reach
+  // the Worker over HTTP; they import the protocol module and the identity verifier, which are runtime-neutral, and
+  // never the Worker's own modules. local/ imports with `.ts` extensions, so Node runs it with its own type stripping.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"],
+    "allowImportingTsExtensions": true
+  },
+  "include": ["test/**/*.ts", "local/**/*.ts", "fake-machine/**/*.ts", "deploy/**/*.ts","vitest.config.ts", "src/protocol/**/*.ts", "src/identity/access.ts", "src/push/**/*.ts", "src/drain.ts"],
+  // The workerd entry and Node suites importing Worker objects/storage need the Worker types in tsconfig.json.
+  "exclude": ["test/support/worker-under-test.ts", "test/machine-end.test.ts", "test/op-store.test.ts"]
+}

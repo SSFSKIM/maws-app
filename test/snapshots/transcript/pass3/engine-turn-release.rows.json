@@ -1,0 +1,348 @@
+[
+  {
+    "at": "2026-09-29T01:50:34.335Z",
+    "id": "time:turn:458685fe-08d6-4f66-82c0-0ad0a63245ae",
+    "kind": "time",
+    "label": "Today 1:50 AM",
+    "turnId": "turn:458685fe-08d6-4f66-82c0-0ad0a63245ae"
+  },
+  {
+    "at": "2026-09-29T01:50:34.335Z",
+    "attachments": [],
+    "dropped": false,
+    "editable": true,
+    "id": "user:458685fe-08d6-4f66-82c0-0ad0a63245ae",
+    "kind": "user",
+    "lines": 1,
+    "messageUuid": "458685fe-08d6-4f66-82c0-0ad0a63245ae",
+    "placeholders": [],
+    "steer": false,
+    "text": "Run in the background: start two background Bash commands with run_in_background, `sleep 15 && echo BG_ONE` and `sleep 16 && echo BG_TWO`. Do not wait for them and do not check on them; reply STARTED right away.",
+    "turnId": "turn:458685fe-08d6-4f66-82c0-0ad0a63245ae"
+  },
+  {
+    "at": "2026-09-29T01:50:34.335Z",
+    "autoDenied": 0,
+    "denied": 0,
+    "endedAt": "2026-09-29T01:50:39.332Z",
+    "expanded": true,
+    "files": [],
+    "firstDeniedCell": null,
+    "id": "divider:turn:458685fe-08d6-4f66-82c0-0ad0a63245ae",
+    "kind": "divider",
+    "origin": "human",
+    "startedAt": "2026-09-29T01:50:34.367Z",
+    "state": "completed",
+    "summary": {
+      "autoDenied": 0,
+      "byCategory": {
+        "commands": 2,
+        "exploration": 0,
+        "files": 0,
+        "mcp": 0,
+        "other": 0,
+        "skills": 0,
+        "web": 0
+      },
+      "childAgents": 0,
+      "costUsd": 0.1365536,
+      "denials": [],
+      "durationMs": 4962,
+      "model": "claude-sonnet-5-5",
+      "safeguard": {
+        "flagged": 0,
+        "notEvaluated": 0,
+        "reviewed": 2
+      },
+      "terminalReason": "completed",
+      "toolCalls": 2,
+      "usage": {
+        "cacheCreationInputTokens": 14509,
+        "cacheReadInputTokens": 50048,
+        "inputTokens": 4,
+        "outputTokens": 255,
+        "thinkingTokens": 0
+      }
+    },
+    "toolCalls": 2,
+    "turnId": "turn:458685fe-08d6-4f66-82c0-0ad0a63245ae"
+  },
+  {
+    "activeLabel": null,
+    "at": "2026-09-29T01:50:36.463Z",
+    "cells": [
+      {
+        "agent": null,
+        "category": "commands",
+        "classification": {
+          "category": "commands",
+          "denial": null,
+          "groupable": true,
+          "hidden": false,
+          "humanDecision": false,
+          "safeguard": "not_flagged",
+          "startsGroup": true,
+          "subagentLifecycle": null
+        },
+        "detail": {
+          "backgroundTaskId": "bre98tfk1",
+          "command": "sleep 15 && echo BG_ONE",
+          "cwd": null,
+          "description": "Sleep 15s then print BG_ONE",
+          "exitCode": 0,
+          "interrupted": false,
+          "kind": "shell",
+          "spill": null,
+          "stderr": "",
+          "stdout": "",
+          "truncated": null
+        },
+        "endedAt": "2026-09-29T01:50:37.480Z",
+        "expanded": true,
+        "id": "cell:toolu_01MTEP3qCAeYHkiHydokPpni",
+        "label": "Ran `sleep 15 && echo BG_ONE` in 1s",
+        "paths": [],
+        "startedAt": "2026-09-29T01:50:36.463Z",
+        "status": "done",
+        "toolName": "Bash",
+        "toolUseId": "toolu_01MTEP3qCAeYHkiHydokPpni"
+      },
+      {
+        "agent": null,
+        "category": "commands",
+        "classification": {
+          "category": "commands",
+          "denial": null,
+          "groupable": true,
+          "hidden": false,
+          "humanDecision": false,
+          "safeguard": "not_flagged",
+          "startsGroup": false,
+          "subagentLifecycle": null
+        },
+        "detail": {
+          "backgroundTaskId": "blj3tvttt",
+          "command": "sleep 16 && echo BG_TWO",
+          "cwd": null,
+          "description": "Sleep 16s then print BG_TWO",
+          "exitCode": 0,
+          "interrupted": false,
+          "kind": "shell",
+          "spill": null,
+          "stderr": "",
+          "stdout": "",
+          "truncated": null
+        },
+        "endedAt": "2026-09-29T01:50:37.483Z",
+        "expanded": true,
+        "id": "cell:toolu_01NHunYiw7HDaWk97x8PQdy3",
+        "label": "Ran `sleep 16 && echo BG_TWO` in 0s",
+        "paths": [],
+        "startedAt": "2026-09-29T01:50:36.680Z",
+        "status": "done",
+        "toolName": "Bash",
+        "toolUseId": "toolu_01NHunYiw7HDaWk97x8PQdy3"
+      }
+    ],
+    "expanded": true,
+    "icon": "commands",
+    "id": "group:cell:toolu_01MTEP3qCAeYHkiHydokPpni",
+    "kind": "group",
+    "state": "completed",
+    "summary": "Ran 2 commands",
+    "turnId": "turn:458685fe-08d6-4f66-82c0-0ad0a63245ae"
+  },
+  {
+    "at": "2026-09-29T01:50:39.092Z",
+    "blockIndex": 0,
+    "id": "text:msg_011CfWthdWzbVALcsMi3TvaV:0",
+    "kind": "assistant_text",
+    "live": false,
+    "markdown": "\nto human\n\nSTARTED\n",
+    "messageUuid": "825e01fd-e3af-4070-8ab3-6dd347eb78d1",
+    "model": "claude-sonnet-5-5",
+    "phase": "answer",
+    "turnId": "turn:458685fe-08d6-4f66-82c0-0ad0a63245ae"
+  },
+  {
+    "at": "2026-09-29T01:50:39.334Z",
+    "attachments": [],
+    "dropped": false,
+    "editable": true,
+    "id": "user:562abf01-f74a-4656-b617-4166196def6e",
+    "kind": "user",
+    "lines": 1,
+    "messageUuid": "562abf01-f74a-4656-b617-4166196def6e",
+    "placeholders": [],
+    "steer": false,
+    "text": "Reply with exactly QUEUED_A",
+    "turnId": "turn:562abf01-f74a-4656-b617-4166196def6e"
+  },
+  {
+    "at": "2026-09-29T01:50:41.660Z",
+    "blockIndex": 0,
+    "id": "text:msg_011CfWthjcrQiJfbg9L1kRM8:0",
+    "kind": "assistant_text",
+    "live": false,
+    "markdown": "\nto human\n\nQUEUED_A\n",
+    "messageUuid": "28b2219b-7f5c-434f-be80-033486d7eb2f",
+    "model": "claude-sonnet-5-5",
+    "phase": "answer",
+    "turnId": "turn:562abf01-f74a-4656-b617-4166196def6e"
+  },
+  {
+    "at": "2026-09-29T01:50:52.569Z",
+    "autoDenied": 0,
+    "denied": 0,
+    "endedAt": "2026-09-29T01:50:54.095Z",
+    "expanded": true,
+    "files": [],
+    "firstDeniedCell": null,
+    "id": "divider:turn:ereplay:journal:124:1",
+    "kind": "divider",
+    "origin": "engine",
+    "startedAt": "2026-09-29T01:50:52.569Z",
+    "state": "completed",
+    "summary": {
+      "autoDenied": 0,
+      "byCategory": {
+        "commands": 0,
+        "exploration": 0,
+        "files": 0,
+        "mcp": 0,
+        "other": 0,
+        "skills": 0,
+        "web": 0
+      },
+      "childAgents": 0,
+      "costUsd": 0.1563076,
+      "denials": [],
+      "durationMs": 1528,
+      "model": "claude-sonnet-5-5",
+      "safeguard": {
+        "flagged": 0,
+        "notEvaluated": 0,
+        "reviewed": 0
+      },
+      "terminalReason": "completed",
+      "toolCalls": 0,
+      "usage": {
+        "cacheCreationInputTokens": 563,
+        "cacheReadInputTokens": 33063,
+        "inputTokens": 2,
+        "outputTokens": 44,
+        "thinkingTokens": 0
+      }
+    },
+    "toolCalls": 0,
+    "turnId": "turn:ereplay:journal:124:1"
+  },
+  {
+    "at": "2026-09-29T01:50:53.473Z",
+    "blockIndex": 0,
+    "id": "text:msg_011CfWtihiHRFxjvHSwWQwpR:0",
+    "kind": "assistant_text",
+    "live": false,
+    "markdown": "Background command BG_ONE finished with exit code 0. I'm not checking its output, as you asked. BG_TWO is still running.",
+    "messageUuid": "6badd364-735a-480e-8a1f-1753a571d9e2",
+    "model": "claude-sonnet-5-5",
+    "phase": "answer",
+    "turnId": "turn:ereplay:journal:124:1"
+  },
+  {
+    "at": "2026-09-29T01:50:54.110Z",
+    "autoDenied": 0,
+    "denied": 0,
+    "endedAt": "2026-09-29T01:50:56.580Z",
+    "expanded": true,
+    "files": [],
+    "firstDeniedCell": null,
+    "id": "divider:turn:ereplay:journal:154:1",
+    "kind": "divider",
+    "origin": "engine",
+    "startedAt": "2026-09-29T01:50:54.110Z",
+    "state": "completed",
+    "summary": {
+      "autoDenied": 0,
+      "byCategory": {
+        "commands": 0,
+        "exploration": 0,
+        "files": 0,
+        "mcp": 0,
+        "other": 0,
+        "skills": 0,
+        "web": 0
+      },
+      "childAgents": 0,
+      "costUsd": 0.1717754,
+      "denials": [],
+      "durationMs": 2482,
+      "model": "claude-sonnet-5-5",
+      "safeguard": {
+        "flagged": 0,
+        "notEvaluated": 0,
+        "reviewed": 0
+      },
+      "terminalReason": "completed",
+      "toolCalls": 0,
+      "usage": {
+        "cacheCreationInputTokens": 976,
+        "cacheReadInputTokens": 33159,
+        "inputTokens": 2,
+        "outputTokens": 51,
+        "thinkingTokens": 0
+      }
+    },
+    "toolCalls": 0,
+    "turnId": "turn:ereplay:journal:154:1"
+  },
+  {
+    "at": "2026-09-29T01:50:56.323Z",
+    "blockIndex": 0,
+    "id": "text:msg_011CfWtipHR7VCBzpfoUaiid:0",
+    "kind": "assistant_text",
+    "live": false,
+    "markdown": "\nto human\n\nBoth background commands have now finished with exit code 0 (BG_ONE and BG_TWO). I didn't read their output.\n",
+    "messageUuid": "4d1ba91a-d0fd-480f-bec1-95a2e3eb90a3",
+    "model": "claude-sonnet-5-5",
+    "phase": "answer",
+    "turnId": "turn:ereplay:journal:154:1"
+  },
+  {
+    "at": "2026-09-29T01:50:54.098Z",
+    "attachments": [],
+    "dropped": false,
+    "editable": true,
+    "id": "user:1a5ce608-758a-47bf-95c1-d259be2ca524",
+    "kind": "user",
+    "lines": 1,
+    "messageUuid": "1a5ce608-758a-47bf-95c1-d259be2ca524",
+    "placeholders": [],
+    "steer": false,
+    "text": "Reply with exactly QUEUED_B",
+    "turnId": "turn:1a5ce608-758a-47bf-95c1-d259be2ca524"
+  },
+  {
+    "at": "2026-09-29T01:50:57.934Z",
+    "blockIndex": 0,
+    "id": "text:msg_011CfWtj1a563Afb7VW2qCGJ:0",
+    "kind": "assistant_text",
+    "live": false,
+    "markdown": "\nto human\n\nQUEUED_B\n",
+    "messageUuid": "850518d4-2d62-4d72-bc3b-abb91b35585e",
+    "model": "claude-sonnet-5-5",
+    "phase": "answer",
+    "turnId": "turn:1a5ce608-758a-47bf-95c1-d259be2ca524"
+  },
+  {
+    "at": "2026-09-29T01:51:01.576Z",
+    "attempt": null,
+    "id": "error:replay:journal:200:0",
+    "kind": "error",
+    "lostAttentionCount": 0,
+    "scope": "exit",
+    "severity": "notice",
+    "text": "Session process exited (quit)",
+    "turnId": null
+  }
+]

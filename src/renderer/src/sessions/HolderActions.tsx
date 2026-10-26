@@ -1,0 +1,77 @@
+// What the holder notice offers for a session held elsewhere (C10 execution document, Actions and Attach; M5): a
+// background job with a known id attaches in a terminal tab (the engine's own `claude attach`), and any holder can be
+// forked into a copy MAWS runs (the engine allows a fork beside a `--bg` holder, and reads another holder's file as a
+// snapshot). Rendered by C5's `HolderNotice` in place of its placeholder button; never on the Overview card (§5.2).
+import { useEffect, useState } from 'react';
+import type { AppSessionId } from '@shared/graph/ids';
+import type { SessionRecord } from '@shared/graph/session';
+import { ipc } from '../ipc/client';
+import { useSessions } from '../stores/sessions';
+import { attachOrSay } from './attach';
+import { canTakeOver, forkInPlace, takeOverSession } from './record-ops';
+
+type ForeignHolder = Extract<SessionRecord['holder'], { kind: 'terminal' | 'background_job' }>;
+
+const BUTTON = 'rounded-sm border border-border px-2 py-0.5 whitespace-nowrap hover:bg-bg-hover disabled:text-fg-faint';
+
+// The installed binary's version (W13: what attach runs), for the note beside Attach when the job runs another.
+function useInstalledVersion(wanted: boolean): string | null {
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    if (!wanted) return;
+    let live = true;
+    void ipc.invoke('engine.binaryInfo', undefined).then((result) => {
+      if (live && result.ok) setVersion(result.value.version);
+    });
+    return () => {
+      live = false;
+    };
+  }, [wanted]);
+  return version;
+}
+
+export function HolderActions({ appSessionId, holder }: { appSessionId: AppSessionId; holder: ForeignHolder }) {
+  const attachable = holder.kind === 'background_job' && holder.jobId !== null;
+  // the version the job's transcript was last written with: the job's own binary
+  const jobVersion = useSessions((s) => s.records.get(appSessionId)?.engineVersion ?? null);
+  const installed = useInstalledVersion(attachable);
+  const [attaching, setAttaching] = useState(false);
+  const [takingOver, setTakingOver] = useState(false); // W7
+
+  const attach = () => {
+    setAttaching(true);
+    void attachOrSay(appSessionId).finally(() => setAttaching(false));
+  };
+
+  return (
+    <>
+      {attachable && installed !== null && jobVersion !== null && jobVersion !== installed && (
+        <span className="whitespace-nowrap text-fg-faint">
+          Job on {jobVersion}; attach runs the installed {installed}
+        </span>
+      )}
+      {attachable && (
+        <button type="button" className={BUTTON} disabled={attaching} onClick={attach}>
+          Attach in a terminal tab
+        </button>
+      )}
+      {/* W7: end the holder after a confirm, then resume here (D-12 as amended 2026-10-01) */}
+      {canTakeOver(holder) && (
+        <button
+          type="button"
+          className={BUTTON}
+          disabled={takingOver}
+          onClick={() => {
+            setTakingOver(true);
+            void takeOverSession(appSessionId, holder).finally(() => setTakingOver(false));
+          }}
+        >
+          Take over here
+        </button>
+      )}
+      <button type="button" className={BUTTON} onClick={() => void forkInPlace(appSessionId)}>
+        Fork a copy
+      </button>
+    </>
+  );
+}

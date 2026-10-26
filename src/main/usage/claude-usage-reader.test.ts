@@ -1,0 +1,297 @@
+import { appendFileSync, cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { UsageSnapshotSchema, type UsageSnapshot } from '@shared/usage/types';
+import { TEST_FIXTURE_DIR } from '../../../test/support/fixtures';
+import { ClaudeUsageReader, claudeUsageDir } from './claude-usage-reader';
+
+// The redacted copy of the owner's ClaudeUsage directory (test/support/redact-claude-usage.ts), read in place: the reader
+// only reads. Suites that change files work on a copy in a temporary directory.
+const FIXTURE = join(TEST_FIXTURE_DIR, 'claude-usage');
+const DRAIN = '2aca3c4b-1e77-4091-908b-d183f6b0f092';
+const ACCOUNTS = ['477e393c-5c1a-4413-a3e6-7f5d1ed72cc3', 'fa95bd34-0db9-44ae-be00-4f2b7387054b', DRAIN, 'aa9db20d-af2c-4718-ba6f-5cea946b4974', 'c07e5b82-c428-48ae-b904-9c1a4b26ec25'];
+const PINNED_TO_DRAIN = 'ee6392b2-e458-4542-9fe0-8a52cf6dc731';
+
+let scratch: string;
+const readers: ClaudeUsageReader[] = [];
+beforeEach(() => {
+  scratch = mkdtempSync(join(tmpdir(), 'maws-usage-'));
+});
+afterEach(() => {
+  vi.useRealTimers();
+  for (const reader of readers.splice(0)) reader.stop();
+  rmSync(scratch, { recursive: true, force: true });
+});
+
+function reader(dir: string, emitted: UsageSnapshot[] = []) {
+  const r = new ClaudeUsageReader({ dir, emit: (snapshot) => emitted.push(UsageSnapshotSchema.parse(snapshot)), log: () => {} });
+  readers.push(r);
+  return r;
+}
+function copy(): string {
+  const dir = join(scratch, 'ClaudeUsage');
+  cpSync(FIXTURE, dir, { recursive: true });
+  return dir;
+}
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe('claude-usage reader parses the fixture directory', () => {
+  it('answers every account with its newest window per key, the drain target and the pins, redacted as committed', async () => {
+    const snapshot = UsageSnapshotSchema.parse(await reader(FIXTURE).snapshot([]));
+    expect(snapshot).toMatchObject({ available: true, dataDir: FIXTURE, error: null, drainTarget: DRAIN, drainTargetIsManual: false, pinsFor: {} });
+    expect(snapshot.accounts.map((a) => a.uuid)).toEqual(ACCOUNTS); // accounts.json order
+    expect(snapshot.accounts.map((a) => [a.email, a.displayName])).toEqual(ACCOUNTS.map((_, i) => [`${i + 1}@example.test`, `Account ${i + 1}`]));
+    const drain = snapshot.accounts.find((a) => a.uuid === DRAIN)!;
+    expect(drain).toEqual({
+      uuid: DRAIN, email: '3@example.test', displayName: 'Account 3', planLabel: 'Max', rateLimitTier: 'default_claude_max_20x', needsReauthentication: false,
+      lastSeenActive: drain.lastSeenActive, pinnedSessionCount: 8, credentialOwnership: 'appManaged',
+      windows: {
+        fiveHour: { percent: 53, resetsAt: '2026-09-29T11:20:00Z', recordedAt: '2026-09-29T07:34:17Z' }, // the newest `session` row
+        sevenDay: { percent: 63, resetsAt: '2026-09-30T03:59:59Z', recordedAt: '2026-09-29T07:26:14Z' }, // the newest `weekly_all` row
+        scoped: [{ model: 'Fable', window: { percent: 82, resetsAt: '2026-09-30T03:59:59Z', recordedAt: '2026-09-29T07:16:14Z' } }],
+      },
+    });
+    expect(snapshot.accounts.map((a) => a.pinnedSessionCount)).toEqual([1, 1, 8, 1, 1]);
+    for (const account of snapshot.accounts) expect(account.windows.scoped.map((s) => s.model)).toEqual(['Fable']);
+    // a week that reset: the newest weekly_all row wins over the 100 % reading before the reset
+    expect(snapshot.accounts[1]!.windows.sevenDay).toEqual({ percent: 0, resetsAt: '2026-10-06T03:00:00Z', recordedAt: '2026-09-29T03:00:07Z' });
+  });
+
+  it('reads the routed account’s display name without changing the usage subscriber’s requested pins', async () => {
+    const dir = copy();
+    const emitted: UsageSnapshot[] = [];
+    const r = reader(dir, emitted);
+    expect(await r.routedAccountName()).toBe('Account 3');
+    await r.snapshot([PINNED_TO_DRAIN]);
+    expect(await r.routedAccountName()).toBe('Account 3');
+    const accounts = JSON.parse(readFileSync(join(dir, 'accounts.json'), 'utf8')) as { uuid: string; displayName: string }[];
+    accounts.find((a) => a.uuid === DRAIN)!.displayName = 'Renamed account';
+    writeFileSync(join(dir, 'accounts.json'), JSON.stringify(accounts));
+    await r.refresh();
+    expect(emitted.at(-1)?.pinsFor).toEqual({ [PINNED_TO_DRAIN]: DRAIN });
+    expect(await r.routedAccountName()).toBe('Renamed account');
+    expect(await reader(join(scratch, 'absent')).routedAccountName()).toBeNull();
+  });
+
+  it('answers pinsFor for exactly the ids asked, and reads nothing it is not asked to write', async () => {
+    const before = readFileSync(join(FIXTURE, 'pins.json'), 'utf8');
+    const r = reader(FIXTURE);
+    expect((await r.snapshot([PINNED_TO_DRAIN, 'not-pinned'])).pinsFor).toEqual({ [PINNED_TO_DRAIN]: DRAIN });
+    expect((await r.snapshot([])).pinsFor).toEqual({});
+    expect(readFileSync(join(FIXTURE, 'pins.json'), 'utf8')).toBe(before);
+  });
+
+  it('reads an older file set: no drainTargetIsManual is false, no credentialOwnership is null, legacy passes', async () => {
+    const dir = copy();
+    const pins = JSON.parse(readFileSync(join(dir, 'pins.json'), 'utf8')) as Record<string, unknown>;
+    delete pins.drainTargetIsManual;
+    writeFileSync(join(dir, 'pins.json'), JSON.stringify(pins));
+    const accounts = JSON.parse(readFileSync(join(dir, 'accounts.json'), 'utf8')) as Record<string, unknown>[];
+    delete accounts[0]!.credentialOwnership;
+    accounts[1]!.credentialOwnership = 'legacy';
+    writeFileSync(join(dir, 'accounts.json'), JSON.stringify(accounts));
+    const snapshot = await reader(dir).snapshot([]);
+    expect(snapshot.drainTargetIsManual).toBe(false);
+    expect(snapshot.accounts.map((a) => a.credentialOwnership).slice(0, 3)).toEqual([null, 'legacy', 'appManaged']);
+  });
+
+  it('answers available: false with an error when the directory is absent', async () => {
+    const snapshot = UsageSnapshotSchema.parse(await reader(join(scratch, 'nowhere')).snapshot(['x']));
+    expect(snapshot).toMatchObject({ available: false, accounts: [], drainTarget: null, drainTargetIsManual: false, pinsFor: {} });
+    expect(snapshot.error).toMatch(/not installed|no data/);
+  });
+
+  it('keeps the previous accounts over a torn accounts.json, or is unavailable without a good read', async () => {
+    const dir = copy();
+    const file = join(dir, 'accounts.json');
+    const good = readFileSync(file, 'utf8');
+    writeFileSync(file, '[{"uuid":');
+    const r = reader(dir);
+    expect(await r.snapshot([])).toMatchObject({ available: false, accounts: [] });
+
+    writeFileSync(file, good);
+    await r.refresh();
+    const previous = await r.snapshot([PINNED_TO_DRAIN]);
+    expect(previous.available).toBe(true);
+    expect(previous.accounts.map((a) => a.uuid)).toEqual(ACCOUNTS);
+    writeFileSync(file, '[{"uuid":');
+    await r.refresh();
+    expect(await r.snapshot([PINNED_TO_DRAIN])).toEqual({ ...previous, readAt: expect.any(String) });
+  });
+
+  it('keeps the previous pins over a torn pins.json, and a torn last history row costs only that row', async () => {
+    const dir = copy();
+    const r = reader(dir);
+    expect((await r.snapshot([PINNED_TO_DRAIN])).pinsFor).toEqual({ [PINNED_TO_DRAIN]: DRAIN });
+    writeFileSync(join(dir, 'pins.json'), '{"drainTarget": "2aca3c4b'); // a write caught halfway
+    appendFileSync(join(dir, 'history', `${DRAIN}.jsonl`), '{"limitKey":"session","percent":99,"recor');
+    await r.refresh();
+    const snapshot = await r.snapshot([PINNED_TO_DRAIN]);
+    expect(snapshot.pinsFor).toEqual({ [PINNED_TO_DRAIN]: DRAIN });
+    expect(snapshot.drainTarget).toBe(DRAIN);
+    expect(snapshot.accounts.find((a) => a.uuid === DRAIN)!.windows.fiveHour!.percent).toBe(53);
+  });
+
+  it('reads only the last 64 KiB of a history file', async () => {
+    const dir = copy();
+    const file = join(dir, 'history', `${DRAIN}.jsonl`);
+    const old = `${JSON.stringify({ limitKey: 'weekly_scoped#Haiku', percent: 5, recordedAt: '2026-09-01T00:00:00Z', resetsAt: '2026-09-08T00:00:00Z' })}\n`;
+    const filler = `${JSON.stringify({ limitKey: 'session', percent: 1, recordedAt: '2026-09-02T00:00:00Z', resetsAt: '2026-09-02T05:00:00Z' })}\n`.repeat(1_000);
+    writeFileSync(file, old + filler + readFileSync(join(FIXTURE, 'history', `${DRAIN}.jsonl`), 'utf8'));
+    const drain = (await reader(dir).snapshot([])).accounts.find((a) => a.uuid === DRAIN)!;
+    expect(drain.windows.scoped.map((s) => s.model)).toEqual(['Fable']); // the Haiku row lies before the tail
+    expect(drain.windows.fiveHour!.percent).toBe(53);
+  });
+
+  it('emits settings.usageChanged once, 500 ms after a history rewrite (within the second), with pinsFor for the last ids asked; an identical rewrite emits nothing', async () => {
+    const dir = copy();
+    const emitted: UsageSnapshot[] = [];
+    const r = reader(dir, emitted);
+    r.start();
+    await r.snapshot([PINNED_TO_DRAIN]);
+    await wait(100); // the watchers are armed
+    // The watcher's events are real file-system events; only the debounce's clock is faked, so the test holds the
+    // debounce until it has seen the rewrite's events, then steps it past 500 ms.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const realUntil = async (check: () => boolean, what: string) => {
+      const deadline = Date.now() + 2_000;
+      while (!check()) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+        await tick();
+      }
+    };
+    const debounceArmed = async () => {
+      await realUntil(() => vi.getTimerCount() > 0, 'the rewrite to reach the watcher');
+      const settle = Date.now() + 100;
+      await realUntil(() => Date.now() >= settle, 'the rewrite\'s other events'); // they re-arm the same debounce
+    };
+    const file = join(dir, 'history', `${DRAIN}.jsonl`);
+    writeFileSync(file, `${readFileSync(file, 'utf8')}${JSON.stringify({ limitKey: 'session', percent: 60, recordedAt: '2026-09-29T07:40:00Z', resetsAt: '2026-09-29T11:20:00Z' })}\n`);
+    await debounceArmed();
+    await vi.advanceTimersByTimeAsync(499);
+    expect(vi.getTimerCount()).toBe(1); // still debouncing: no read has started, so nothing can have been emitted
+    expect(emitted).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    await realUntil(() => emitted.length > 0, 'settings.usageChanged');
+    await r.refresh(); // a further read of the same files publishes nothing
+    expect(emitted).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(emitted[0]!.accounts.find((a) => a.uuid === DRAIN)!.windows.fiveHour!.percent).toBe(60);
+    expect(emitted[0]!.pinsFor).toEqual({ [PINNED_TO_DRAIN]: DRAIN });
+
+    writeFileSync(file, readFileSync(file, 'utf8')); // the same bytes again
+    await debounceArmed();
+    await vi.advanceTimersByTimeAsync(500);
+    await r.refresh(); // shares the debounced read in flight, so both have compared once this settles
+    expect(emitted).toHaveLength(1);
+  });
+});
+
+describe('the ClaudeUsage directory', () => {
+  it('is MAWS_CLAUDE_USAGE_DIR when set, else under the home directory', () => {
+    expect(claudeUsageDir({ MAWS_CLAUDE_USAGE_DIR: '/fixture' }, '/Users/x')).toBe('/fixture');
+    expect(claudeUsageDir({}, '/Users/x')).toBe('/Users/x/Library/Application Support/ClaudeUsage');
+  });
+});
+
+// C11 start: settings.claudeUsage.status's dataDirPresent reads the reader's availability without becoming a caller
+describe('claude-usage reader availability (C11)', () => {
+  it('answers whether the directory is there, and leaves the ids the last settings.usage named in place', async () => {
+    expect(await reader(join(scratch, 'absent')).available()).toBe(false);
+    const dir = copy();
+    const emitted: UsageSnapshot[] = [];
+    const r = reader(dir, emitted);
+    await r.snapshot([PINNED_TO_DRAIN]);
+    expect(await r.available()).toBe(true);
+    appendFileSync(join(dir, 'history', `${DRAIN}.jsonl`), '{"limitKey":"session","percent":61,"resetsAt":"2099-09-28T16:09:59Z","recordedAt":"2099-09-28T15:30:00Z"}\n');
+    await r.refresh();
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]!.pinsFor).toEqual({ [PINNED_TO_DRAIN]: DRAIN }); // a settings.usage([]) here would have emptied it
+  });
+});
+// C11 end
+
+// W6 start: what the top bar's usage popover shows beside the accounts (E1)
+describe('claude-usage reader, the rest of the panel (W6)', () => {
+  const NOW = Date.parse('2026-09-29T07:36:17Z');
+  const C6 = 'c0de0001-0000-4000-8000-000000000006';
+  const C7 = 'c0de0002-0000-4000-8000-000000000007';
+  const at = (dir: string) => {
+    const r = new ClaudeUsageReader({ dir, emit: () => {}, log: () => {}, now: () => NOW });
+    readers.push(r);
+    return r;
+  };
+
+  it("reads gateway.json's toggle, the Codex accounts with their drain target and pins, and the last ten minutes", async () => {
+    const snapshot = UsageSnapshotSchema.parse(await at(FIXTURE).snapshot([]));
+    expect(snapshot.readAt).toBe('2026-09-29T07:36:17.000Z');
+    expect(snapshot.gateway).toEqual({ routingEnabled: true, port: 8641 });
+    expect(snapshot.codex).toEqual({
+      drainTarget: C6, // both models' pins files name it
+      drainTargetIsManual: false,
+      accounts: [
+        { accountId: C6, email: '6@example.test', planLabel: 'Pro', needsReauthentication: false, pinnedSessionCount: 2 },
+        { accountId: C7, email: '7@example.test', planLabel: 'Plus', needsReauthentication: true, pinnedSessionCount: 1 },
+      ],
+    });
+    expect(snapshot.activity!.health.requests).toBe(8);
+    expect(snapshot.activity!.accounts.find((a) => a.account === DRAIN)!.requests).toBe(5);
+  });
+
+  it('reads the rest of an existing directory without accounts.json and reports it available', async () => {
+    const dir = copy();
+    rmSync(join(dir, 'accounts.json'));
+    const r = at(dir);
+    expect(await r.available()).toBe(true);
+    const snapshot = UsageSnapshotSchema.parse(await r.snapshot([PINNED_TO_DRAIN]));
+    expect(snapshot).toMatchObject({
+      available: true, error: null, accounts: [], drainTarget: DRAIN, drainTargetIsManual: false,
+      pinsFor: { [PINNED_TO_DRAIN]: DRAIN },
+    });
+    expect(snapshot.gateway).toEqual({ routingEnabled: true, port: 8641 });
+    expect(snapshot.codex).toEqual({
+      drainTarget: C6,
+      drainTargetIsManual: false,
+      accounts: [
+        { accountId: C6, email: '6@example.test', planLabel: 'Pro', needsReauthentication: false, pinnedSessionCount: 2 },
+        { accountId: C7, email: '7@example.test', planLabel: 'Plus', needsReauthentication: true, pinnedSessionCount: 1 },
+      ],
+    });
+    expect(snapshot.activity!.health.requests).toBe(8);
+    expect(snapshot.activity!.accounts.find((a) => a.account === DRAIN)!.requests).toBe(5);
+  });
+
+  it('keeps the whole previous Codex reading when a disagreeing model pins file is torn', async () => {
+    const dir = copy();
+    const sol = join(dir, 'codex-pins.gpt-6.1-sol.json');
+    writeFileSync(sol, JSON.stringify({ ...JSON.parse(readFileSync(sol, 'utf8')), drainTarget: C7 }));
+    const r = at(dir);
+    const previous = (await r.snapshot([])).codex;
+    expect(previous).toMatchObject({ drainTarget: null, drainTargetIsManual: false });
+    expect(previous!.accounts.map((a) => a.pinnedSessionCount)).toEqual([2, 1]);
+
+    writeFileSync(sol, '{"drainTarget":');
+    await r.refresh();
+    expect((await r.snapshot([])).codex).toEqual(previous);
+  });
+
+  it('no Codex drain target when the models disagree; each file absent is null, and a torn one keeps the last reading', async () => {
+    const dir = copy();
+    const sol = join(dir, 'codex-pins.gpt-6.1-sol.json');
+    writeFileSync(sol, JSON.stringify({ ...JSON.parse(readFileSync(sol, 'utf8')), drainTarget: C7 }));
+    const r = at(dir);
+    expect((await r.snapshot([])).codex!.drainTarget).toBeNull();
+    writeFileSync(join(dir, 'gateway.json'), '{"routingEnab');
+    writeFileSync(join(dir, 'codex-accounts.json'), '[{"accountID"');
+    await r.refresh();
+    const torn = await r.snapshot([]);
+    expect(torn.gateway).toEqual({ routingEnabled: true, port: 8641 });
+    expect(torn.codex!.accounts).toHaveLength(2);
+    for (const name of ['gateway.json', 'codex-accounts.json', 'gateway-requests.jsonl']) rmSync(join(dir, name));
+    await r.refresh();
+    expect(await r.snapshot([])).toMatchObject({ available: true, gateway: null, codex: null, activity: null });
+  });
+});
+// W6 end

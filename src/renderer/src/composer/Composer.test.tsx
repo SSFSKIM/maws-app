@@ -1,0 +1,1531 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { useRef, useSyncExternalStore, type ReactNode } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { QueueEntry } from '@shared/engine/session-state-store';
+import type { EngineSessionStatus } from '@shared/engine/status';
+import type { AppSessionId } from '@shared/graph/ids';
+import type { SessionRecord } from '@shared/graph/session';
+import type { MawsBridge } from '@shared/ipc/schema';
+import type { TabSet } from '@shared/ipc/schema/layout'; // E9
+import { digest, humanTurn, item, record, status } from '../../../../test/support/builders'; // C12: digest; E11 F2b: item
+import { fakeClient, type FakeClient } from '../../../../test/support/fake-client';
+import { connectKeys } from '../keymap/dispatcher';
+import { bindingsOf, useKeyChord } from '../keymap/useKeyChord';
+import { itemFor, permission } from '../request-card/test-requests';
+import { useAttention } from '../stores/attention';
+import { insertComposerText, isStarting, prefillComposer, queueComposerAttachment, requestChipWidget, resetComposerStore, useComposerStore } from '../stores/composer';
+import type { Draft } from '@shared/ipc/schema/session'; // P3-G
+import { addMarkupToChat, MARKUP_COPY, resetMarkup, startMarkup, useMarkup } from '../markup/session'; // P3-G
+import { registerMarkupSurface, resetMarkupSurfaces } from '../markup/surface'; // P3-G
+import { MarkupLayer } from '../markup/MarkupLayer'; // P3-G
+import { mainShowing } from '../test-support/panel'; // P3-G
+import { useLayout } from '../stores/layout';
+import { useNotices } from '../stores/notices';
+import { resetQueueStore } from '../stores/queue';
+import { useSessions } from '../stores/sessions';
+import { resetShellStores } from '../test-support/shell-stores';
+import { resetCatalogStore } from '../stores/catalog';
+import { Composer } from './Composer';
+import { ComposerAppKeys } from './ComposerAppKeys';
+import { DockedCardFrame } from './docked/DockedCardFrame';
+import { dockCard, resetDockedCards } from './docked/registry';
+import { docOf, paragraph, textNode } from './editor/doc';
+import { resetEffectiveEfforts } from './effective-effort'; // W3
+import { registerSlashWidget } from './mentions/widgets'; // W3
+import { closeWidgetDialog, openWidgetDialog, useWidgetDialog, WidgetDialogHost } from './WidgetDialog'; // W3; P2-B M6: the host and its open
+import { registerSetupIntentHook, type HookResult, type SetupIntentHook, type SetupIntentPatch } from './setup-intent';
+import { currentSet } from '../stores/layout-model';
+import { useSetup } from '../sessions/store'; // P2-A
+import { trustState } from '../test-support/setup-intents'; // P2-A
+import { DictationKeys } from './dictation/DictationKeys'; // E9
+import { modelSelector } from '../widgets/ModelSelector'; // P2-F S chip (review)
+import { resetModelRequests } from '../widgets/model'; // P2-F S chip (review)
+import { resetDictationStore, useDictationStore } from './dictation/store'; // E9
+
+const A = 'app-a' as AppSessionId;
+const B = 'app-b' as AppSessionId;
+let fake: FakeClient;
+let disconnect: () => void;
+let queryClient: QueryClient;
+
+const rules = { state: { rules: [], workspaceDirectories: ['/work/app-a/extra'], originalCwd: '/work/app-a', managedOnly: false } };
+beforeEach(() => {
+  resetShellStores();
+  resetComposerStore();
+  resetEffectiveEfforts(); // W3
+  resetQueueStore();
+  resetCatalogStore();
+  resetDockedCards();
+  useNotices.setState({ notices: [] });
+  fake = fakeClient({
+    'session.queue.list': { entries: [], paused: false, pauseReason: null },
+    'session.history.list': { entries: [] },
+    'session.drafts.get': null,
+    'session.drafts.set': undefined,
+    'session.history.append': undefined,
+    'session.send': { messageUuid: null, disposition: 'sent', queueId: 'q-1' },
+    'session.steer': { messageUuid: '11111111-1111-4111-8111-111111111111' },
+    'session.interrupt': { stillQueued: [], cancelled: [] },
+    'session.listModels': {
+      models: [
+        { value: 'default', resolvedModel: 'claude-sonnet', displayName: 'Default (recommended)', description: '' },
+        { value: 'sonnet', resolvedModel: 'claude-sonnet', displayName: 'Sonnet', description: 'fast' },
+        { value: 'haiku', resolvedModel: 'claude-haiku-5-5', displayName: 'Haiku', description: '' },
+      ],
+    },
+    'session.listPermissionRules': rules,
+    // C10's catalogue per route (`engine.models`): an entry names a resolved id through `resolvedModel`, as initialize's do
+    // (W3: the chip names the row's value, so the two routes' rows differ by value); Haiku's row says what `haiku` runs, so
+    // the chip can tell a request for it from the model reported (exact ids, the review of S-chip)
+    'engine.models': (input: { gateway?: string }) => ({
+      models: [
+        { value: input.gateway === 'direct' ? 'sonnet' : 'claude/sonnet-relay', resolvedModel: 'claude-sonnet', displayName: 'Sonnet' },
+        { value: 'haiku', resolvedModel: 'claude-haiku-5-5', displayName: 'Haiku' },
+      ],
+      source: 'cached',
+      at: '2026-09-29T09:00:00.000Z',
+    }),
+    'session.applyFlagSettings': undefined,
+    'session.answer': { outcome: 'delivered' },
+    'layout.pickFiles': { files: [{ path: '/work/picked', name: 'picked', bytes: 0, mediaType: 'inode/directory', data: null }] },
+    'session.setPermissionMode': { effective: 'default', refusal: 'auto_mode_model', error: 'model does not support auto' },
+  });
+  window.maws = fake.client;
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  disconnect = connectKeys();
+});
+afterEach(() => {
+  disconnect();
+  cleanup();
+  registerSetupIntentHook(() => null);
+  delete (window as { maws?: MawsBridge }).maws;
+  vi.useRealTimers();
+});
+
+function live(appSessionId: AppSessionId, over: { status?: Partial<EngineSessionStatus>; record?: Partial<SessionRecord> } = {}) {
+  const s = useSessions.getState();
+  useSessions.setState({
+    records: new Map(s.records).set(appSessionId, record(appSessionId, over.record)),
+    engine: new Map(s.engine).set(appSessionId, { ...status(appSessionId), ...over.status }),
+    recordsVersion: s.recordsVersion + 1,
+  });
+}
+const busy = (appSessionId: AppSessionId) => live(appSessionId, { status: status(appSessionId, { engineState: 'running', turn: humanTurn }) });
+
+function Pane({ index, children }: { index: 0 | 1; children: ReactNode }) {
+  return (
+    <section data-pane={index} aria-label={`pane ${index}`} onFocusCapture={() => useLayout.getState().focusPane(index)}>
+      {children}
+    </section>
+  );
+}
+
+function mount(panes: { index: 0 | 1; id: AppSessionId }[], extra: ReactNode = null) {
+  return render(
+    <QueryClientProvider client={queryClient}>
+      {panes.map(({ index, id }) => (
+        <Pane key={index} index={index}>
+          <Composer appSessionId={id} paneIndex={index} />
+        </Pane>
+      ))}
+      {extra}
+    </QueryClientProvider>,
+  );
+}
+
+type TiptapElement = HTMLElement & { editor: { commands: { insertContent(text: string): boolean; setTextSelection(at: number): boolean; blur(): boolean; clearContent(): boolean }; getText(): string; isFocused: boolean } };
+const composerOf = (index: 0 | 1) => screen.getByRole('region', { name: `pane ${index}` });
+const editorOf = (index: 0 | 1 = 0) => within(composerOf(index)).getByRole('textbox', { name: 'Message', hidden: true }) as TiptapElement;
+const type = (text: string, index: 0 | 1 = 0) => act(() => void editorOf(index).editor.commands.insertContent(text));
+const key = (target: HTMLElement, init: KeyboardEventInit) => act(async () => void target.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })));
+const primary = (index: 0 | 1 = 0) => composerOf(index).querySelector<HTMLButtonElement>('[data-submit-state]')!;
+const invoked = (name: Parameters<FakeClient['invoked']>[0]) => fake.invoked(name);
+const plusOf = (index: 0 | 1 = 0) => within(composerOf(index)).getByRole('button', { name: 'Add files, photos or commands' });
+// W10 (C9): the "+" menu's Add directory…, its disabled reason (null when enabled), the menu closed again
+async function addDirectoryState(user = userEvent.setup()): Promise<string | null> {
+  await user.click(plusOf());
+  const item = await screen.findByRole('menuitem', { name: /^Add directory…/ });
+  const reason = item.getAttribute('aria-disabled') === 'true' ? item.textContent!.replace('Add directory…', '') : null;
+  await user.keyboard('{Escape}');
+  await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+  return reason;
+}
+
+describe("composer DOM under C5's dispatcher", () => {
+  it('marks only the editor root as the key sink; the control, the chips, the toolbar and the queue are pane content', async () => {
+    live(A);
+    mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(editorOf()).toBeTruthy());
+    const sinks = composerOf(0).querySelectorAll('[data-key-sink]');
+    expect(sinks).toHaveLength(1);
+    expect(sinks[0].contains(editorOf())).toBe(true);
+    for (const outside of [primary(), within(composerOf(0)).getByRole('toolbar', { name: 'Composer tools' }), plusOf()]) expect(sinks[0].contains(outside)).toBe(false);
+  });
+
+  it('is one Send: idle it sends, during a turn Enter and the button steer with priority next; no menu, no ⌥ relabel, no Stop beside it (W10)', async () => {
+    live(A);
+    mount([{ index: 0, id: A }]);
+    await type('hello');
+    expect(primary().textContent).toBe('Send');
+    expect(primary().title).toBe('Send (Enter)');
+    await key(editorOf(), { key: 'Enter' });
+    await waitFor(() => expect(invoked('session.send')).toEqual([{ appSessionId: A, content: 'hello' }]));
+    await waitFor(() => expect(editorOf().editor.getText()).toBe(''));
+
+    busy(A);
+    await waitFor(() => expect(primary().textContent).toBe('Stop'));
+    await type('fold this in');
+    act(() => editorOf().focus());
+    await waitFor(() => expect(primary().textContent).toBe('Send'));
+    expect(primary().title).toBe('Sends at the next step (Enter)');
+    expect(primary().getAttribute('aria-description')).toBe('Sends at the next step');
+    // ⌥ held changes nothing, and nothing sits beside the button
+    await act(async () => void editorOf().dispatchEvent(new KeyboardEvent('keydown', { key: 'Alt', altKey: true, bubbles: true })));
+    expect(primary().textContent).toBe('Send');
+    await act(async () => void editorOf().dispatchEvent(new KeyboardEvent('keyup', { key: 'Alt', altKey: false, bubbles: true })));
+    expect(within(composerOf(0)).queryByRole('button', { name: 'More ways to send' })).toBeNull();
+    expect(within(composerOf(0)).queryByRole('button', { name: 'Stop' })).toBeNull();
+    await key(editorOf(), { key: 'Enter' });
+    await waitFor(() => expect(invoked('session.steer')).toEqual([{ appSessionId: A, content: 'fold this in', priority: 'next' }]));
+    await waitFor(() => expect(editorOf().editor.getText()).toBe(''));
+
+    await type('and this');
+    await userEvent.setup().click(primary());
+    await waitFor(() => expect(invoked('session.steer')).toHaveLength(2));
+    expect(invoked('session.steer')[1]).toEqual({ appSessionId: A, content: 'and this', priority: 'next' });
+    expect(invoked('session.send')).toHaveLength(1);
+    expect(invoked('session.history.append').map((i) => (i as { display: string }).display)).toEqual(['hello', 'fold this in', 'and this']);
+  });
+
+  it('stops from the button with the box empty during a turn: the plain stop that holds waiting steers (W10)', async () => {
+    busy(A);
+    mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(primary().textContent).toBe('Stop'));
+    expect(primary().title).toBe('Stop the running turn (⌘.)');
+    await userEvent.setup().click(primary());
+    await waitFor(() => expect(invoked('session.interrupt')).toEqual([{ appSessionId: A, cancelEngineQueued: false, holdEngineQueued: true }]));
+  });
+
+  it('Esc while a turn runs interrupts and sends the held head now, or stops when nothing is held; it leaves Esc alone when idle (W1)', async () => {
+    live(A);
+    mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(fake.pending('session.queue.list')).toBe(0));
+    act(() => editorOf().focus());
+    await key(editorOf(), { key: 'Escape' });
+    expect(invoked('session.interrupt')).toEqual([]); // idle: not the composer's
+    busy(A);
+    await key(editorOf(), { key: 'Escape' });
+    await waitFor(() => expect(invoked('session.interrupt')).toEqual([{ appSessionId: A, cancelEngineQueued: false }])); // Esc holds nothing back: a waiting steer runs now
+    const uncertain: QueueEntry = { queueId: 'q-0', appSessionId: A, content: 'maybe sent', createdAt: '2026-09-29T10:00:00.000Z', state: 'queued', messageUuid: null, submittedAt: null, uncertain: true, steer: false };
+    const held: QueueEntry = { ...uncertain, queueId: 'q-1', content: 'later', uncertain: false };
+    act(() => fake.event('session.queue', { appSessionId: A, entries: [uncertain, held], paused: false, pauseReason: null }));
+    await key(editorOf(), { key: 'Escape' });
+    await waitFor(() => expect(invoked('session.queue.promote')).toEqual([{ appSessionId: A, queueId: 'q-1', priority: 'now' }])); // the uncertain one waits for the human
+    expect(invoked('session.interrupt')).toHaveLength(1);
+  });
+
+  // W3 (B7, charter §5.4 as amended 2026-10-01): the terminal's Esc Esc, with no turn running, on an empty editor
+  it('Esc Esc on an empty editor with no turn running opens the rewind picker; one Esc, text, or a turn running does not', async () => {
+    const off = registerSlashWidget('rewind', { title: 'Rewind', component: () => <p>picker</p> });
+    try {
+      live(A);
+      mount([{ index: 0, id: A }]);
+      await waitFor(() => expect(fake.pending('session.queue.list')).toBe(0));
+      act(() => editorOf().focus());
+      await key(editorOf(), { key: 'Escape' });
+      expect(useWidgetDialog.getState().open).toBeNull();
+      await key(editorOf(), { key: 'Escape' });
+      expect(useWidgetDialog.getState().open).toMatchObject({ appSessionId: A, name: 'rewind' }); // the app's floating dialog
+      act(() => closeWidgetDialog());
+      await type('a draft');
+      await key(editorOf(), { key: 'Escape' });
+      await key(editorOf(), { key: 'Escape' });
+      expect(useWidgetDialog.getState().open).toBeNull(); // the draft is not empty
+      act(() => editorOf().editor.commands.clearContent());
+      busy(A);
+      await key(editorOf(), { key: 'Escape' });
+      await key(editorOf(), { key: 'Escape' });
+      expect(useWidgetDialog.getState().open).toBeNull(); // a turn running: Esc interrupts (W1)
+      await waitFor(() => expect(invoked('session.interrupt')).toHaveLength(2));
+    } finally {
+      off();
+      closeWidgetDialog();
+    }
+  });
+
+  it('reads Stop with an empty editor and Send with text while a first entry is submitting and no turn is open yet', async () => {
+    live(A);
+    mount([{ index: 0, id: A }]);
+    const submitting: QueueEntry = { queueId: 'q-1', appSessionId: A, content: 'first', createdAt: '2026-09-29T10:00:00.000Z', state: 'submitting', messageUuid: null, submittedAt: '2026-09-29T10:00:00.000Z', uncertain: false, steer: false };
+    await waitFor(() => expect(fake.pending('session.queue.list')).toBe(0));
+    act(() => fake.event('session.queue', { appSessionId: A, entries: [submitting], paused: false, pauseReason: null }));
+    await waitFor(() => expect(primary().textContent).toBe('Stop'));
+    await type('second');
+    await waitFor(() => expect(primary().textContent).toBe('Send'));
+    expect(primary().title).toBe('Sends at the next step (Enter)');
+    expect(within(composerOf(0)).queryByRole('button', { name: 'Stop' })).toBeNull(); // W10: nothing beside it
+  });
+
+  it('resumes a paused queue from the control, and says so when the host refuses', async () => {
+    live(A);
+    mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(fake.pending('session.queue.list')).toBe(0));
+    const queued: QueueEntry = { queueId: 'q-1', appSessionId: A, content: 'later', createdAt: '2026-09-29T10:00:00.000Z', state: 'queued', messageUuid: null, submittedAt: null, uncertain: false, steer: false };
+    act(() => fake.event('session.queue', { appSessionId: A, entries: [queued], paused: true, pauseReason: 'interrupt' }));
+    await waitFor(() => expect(primary().textContent).toBe('Resume'));
+    await userEvent.setup().click(primary());
+    await waitFor(() => expect(fake.pending('session.queue.setPaused')).toBe(1));
+    await fake.fail('session.queue.setPaused', 'the queue store is unavailable');
+    await waitFor(() => expect(useNotices.getState().notices.map((n) => n.text)).toEqual(['the queue store is unavailable']));
+    // l2-transcript-15 (b46e2ea63): fresh text after Stop sends now, without resuming older held messages.
+    await type('one more');
+    await waitFor(() => expect(primary().textContent).toBe('Send'));
+    expect(primary().title).toBe('Sends this now (Enter)');
+    await key(editorOf(), { key: 'Enter' });
+    await waitFor(() => expect(invoked('session.send')).toEqual([{ appSessionId: A, content: 'one more' }]));
+    expect(invoked('session.steer')).toEqual([]);
+  });
+
+  it('keeps Enter in the editor from any request.accept handler, and ⌘Enter sends only from the editor', async () => {
+    live(A);
+    const accepted = vi.fn();
+    // a pane-scoped Enter owned by the pane that holds the composer: it would receive any Enter from inside it that C5's
+    // dispatcher does not refuse
+    function CountingPane({ children }: { children: ReactNode }) {
+      const ref = useRef<HTMLElement>(null);
+      useKeyChord('request.accept', accepted, { within: ref });
+      return (
+        <section ref={ref} data-pane={0} aria-label="pane 0">
+          {children}
+        </section>
+      );
+    }
+    render(
+      <QueryClientProvider client={queryClient}>
+        <CountingPane>
+          <Composer appSessionId={A} paneIndex={0} />
+        </CountingPane>
+      </QueryClientProvider>,
+    );
+    act(() => editorOf().focus());
+    await key(editorOf(), { key: 'Enter' });
+    // a key whose target is inside the editor's sink but is no text entry and no button: only the sink refuses it
+    const sink = composerOf(0).querySelector<HTMLElement>('[data-key-sink="composer"]')!;
+    await key(sink, { key: 'Enter' });
+    expect(accepted).not.toHaveBeenCalled();
+    await key(composerOf(0), { key: 'Enter' }); // the same key outside the sink, focus still in the pane: the pane's
+    expect(accepted).toHaveBeenCalledTimes(1);
+    await type('from the button');
+    act(() => primary().focus());
+    await key(primary(), { key: 'Enter', metaKey: true });
+    expect(invoked('session.send')).toEqual([]); // composer.send is delivered only inside the editor's sink
+    act(() => editorOf().focus());
+    await key(editorOf(), { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(invoked('session.send')).toHaveLength(1));
+  });
+
+  it('gives the frame’s place to a docked permission without unmounting the editor, and takes focus back after', async () => {
+    live(A);
+    mount([{ index: 0, id: A }]);
+    await type('a draft kept aside');
+    act(() => editorOf().focus());
+    const event = permission({ requestId: 'req-a' as never });
+    const item = itemFor(event, A);
+    act(() => useAttention.setState({ bySession: new Map([[A, [item]]]), requests: new Map([[item.id, event]]), version: 1 }));
+    const frame = await within(composerOf(0)).findByRole('group', { name: 'Approval needed' });
+    expect(composerOf(0).querySelector('[data-composer-draft]')!.hasAttribute('hidden')).toBe(true); // the box and the toolbar
+    expect(within(composerOf(0)).getByRole('toolbar', { name: 'Composer tools', hidden: true }).closest('[hidden]')).not.toBeNull(); // W2: the location with it
+    expect(editorOf().editor.getText()).toBe('a draft kept aside'); // mounted, hidden
+    await waitFor(() => expect(document.activeElement).toBe(frame)); // the pane held focus
+    expect(useComposerStore.getState().docked.get(A)?.has('req-a' as never)).toBe(true);
+    await key(frame, { key: 'Enter' });
+    await waitFor(() => expect(invoked('session.answer')).toHaveLength(1));
+    act(() => useAttention.setState({ bySession: new Map([[A, []]]), version: 2 }));
+    await waitFor(() => expect(composerOf(0).querySelector('[data-composer-draft]')!.hasAttribute('hidden')).toBe(false));
+    expect(editorOf().editor.getText()).toBe('a draft kept aside');
+    await waitFor(() => expect(editorOf().contains(document.activeElement)).toBe(true)); // focus is back in the editor
+  });
+
+  it('hands focus from a retiring docked request to the next one, whose Enter answers it (§5.7)', async () => {
+    live(A);
+    mount([{ index: 0, id: A }]);
+    act(() => editorOf().focus());
+    const first = permission({ requestId: 'req-1' as never, at: '2026-09-29T09:00:00.000Z' });
+    const second = permission({ requestId: 'req-2' as never, at: '2026-09-29T09:01:00.000Z' });
+    const [one, two] = [itemFor(first, A), itemFor(second, A)];
+    const requests = new Map([
+      [one.id, first],
+      [two.id, second],
+    ]);
+    act(() => useAttention.setState({ bySession: new Map([[A, [one, two]]]), requests, version: 1 }));
+    await waitFor(() => expect(document.activeElement?.getAttribute('data-docked-frame')).toBe(A));
+    expect(within(composerOf(0)).getByText('1 more waiting')).toBeTruthy();
+    await key(document.activeElement as HTMLElement, { key: 'Enter' });
+    await waitFor(() => expect(invoked('session.answer')).toEqual([{ appSessionId: A, requestId: 'req-1', answer: { kind: 'permission', decision: 'allow', scope: 'once' } }]));
+    act(() => useAttention.setState({ bySession: new Map([[A, [two]]]), version: 2 })); // the first retires behind the second
+    await waitFor(() => expect(composerOf(0).querySelector('[data-request-card]')?.getAttribute('data-request-card')).toBe(two.id));
+    await new Promise((resolve) => requestAnimationFrame(resolve)); // past any deferred return to the editor
+    const next = composerOf(0).querySelector<HTMLElement>('[data-docked-frame]')!;
+    expect(document.activeElement).toBe(next);
+    await key(next, { key: 'Enter' });
+    await waitFor(() => expect(invoked('session.answer').at(-1)).toEqual({ appSessionId: A, requestId: 'req-2', answer: { kind: 'permission', decision: 'allow', scope: 'once' } }));
+  });
+
+  it('docks a foreign card ahead of any request, hides the editor the same way, and answers Enter through its own onAccept', async () => {
+    live(A);
+    mount([{ index: 0, id: A }]);
+    await type('still here');
+    const onAccept = vi.fn();
+    const undock = dockCard(A, { id: 'c10:trust', render: () => <DockedCardFrame appSessionId={A} title="Trust this folder?" onAccept={onAccept} onDecline={null}>Trust?</DockedCardFrame> });
+    const frame = await within(composerOf(0)).findByRole('group', { name: 'Trust this folder?' });
+    expect(composerOf(0).querySelector('[data-composer-draft]')!.hasAttribute('hidden')).toBe(true);
+    act(() => frame.focus());
+    await key(frame, { key: 'Enter' });
+    expect(onAccept).toHaveBeenCalledTimes(1);
+    act(() => undock());
+    await waitFor(() => expect(composerOf(0).querySelector('[data-composer-draft]')!.hasAttribute('hidden')).toBe(false));
+    expect(editorOf().editor.getText()).toBe('still here');
+  });
+
+  it('inserts text for C11 at the caret without replacing the document, at the caret it left when focus went elsewhere, and at the end when it never had one', async () => {
+    live(A);
+    mount([{ index: 0, id: A }]);
+    await type('one three');
+    act(() => {
+      editorOf().editor.commands.setTextSelection(5); // after `one `
+    });
+    // never focused since the document was set: no caret of the human's, so the end
+    act(() => insertComposerText(A, ' four'));
+    expect(editorOf().editor.getText()).toBe('one three four');
+    act(() => {
+      editorOf().editor.commands.setTextSelection(5);
+    });
+    act(() => editorOf().focus());
+    await waitFor(() => expect(editorOf().editor.isFocused).toBe(true));
+    act(() => insertComposerText(A, 'two '));
+    expect(editorOf().editor.getText()).toBe('one two three four');
+    act(() => primary().focus()); // focus leaves the editor, the caret after `two `
+    await waitFor(() => expect(editorOf().editor.isFocused).toBe(false));
+    act(() => insertComposerText(A, 'and '));
+    expect(editorOf().editor.getText()).toBe('one two and three four');
+  });
+
+  // P2-B M6 (§5.10): "Use in chat" from a dialog widget closes it and inserts at the composer's caret, the text after the
+  // caret kept after the insertion, though the dialog holds the keyboard when the widget asks
+  it('a dialog widget’s insertion lands at the caret the editor had when the dialog opened', async () => {
+    const off = registerSlashWidget('skills', {
+      title: 'Skills',
+      component: ({ appSessionId, close }) => (
+        <button
+          type="button"
+          onClick={() => {
+            close();
+            insertComposerText(appSessionId, '/frontend-design:frontend-design ');
+          }}
+        >
+          Use in chat
+        </button>
+      ),
+    });
+    try {
+      live(A);
+      mount([{ index: 0, id: A }], <WidgetDialogHost />);
+      await waitFor(() => expect(fake.pending('session.queue.list')).toBe(0));
+      await type('make the landing page calmer');
+      const editor = editorOf(); // the dialog hides the rest of the page from queries by role
+      act(() => editor.focus());
+      await waitFor(() => expect(editor.editor.isFocused).toBe(true));
+      act(() => {
+        editor.editor.commands.setTextSelection(6); // after `make ` (the paragraph opens at 1)
+      });
+      act(() => openWidgetDialog(A, 'skills', ''));
+      const use = await screen.findByRole('button', { name: 'Use in chat' });
+      await waitFor(() => expect(editor.editor.isFocused).toBe(false)); // the dialog holds the keyboard
+      fireEvent.click(use);
+      expect(editor.editor.getText()).toBe('make /frontend-design:frontend-design the landing page calmer');
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(invoked('session.send')).toEqual([]); // inserted, not sent
+    } finally {
+      off();
+      closeWidgetDialog();
+    }
+  });
+
+  it('the model chip names its model from the route’s engine.models catalogue before any menu opens, and never lists models on mount', async () => {
+    const direct = { mode: 'direct' as const, baseUrl: null, verified: 'direct' as const, autoModeServer: 'unknown' as const, localLane: null };
+    live(A, { status: { model: { requested: null, resolved: 'claude-sonnet' }, gateway: direct } });
+    const view = mount([{ index: 0, id: A }]);
+    const chip = () => within(composerOf(0)).getByRole('button', { name: /^Model / });
+    await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model sonnet'));
+    expect(invoked('engine.models')).toContainEqual({ refresh: false, gateway: 'direct', cwd: '/work/app-a' }); // the session's own route and directory
+    expect(invoked('session.listModels')).toEqual([]); // the engine is not asked on mount
+    view.unmount();
+    // an exited session names it from the route its record kept
+    useSessions.setState({ engine: new Map(), records: new Map([[A, record(A, { model: { requested: null, resolved: 'claude-sonnet' } })]]) });
+    mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model sonnet-relay'));
+    expect(invoked('engine.models')).toContainEqual({ refresh: false, gateway: 'gateway', cwd: '/work/app-a' });
+  });
+
+  // P2-F wave S (S-chip; the sitting's A1.6): after a set_model on a live session the chip names the model asked for,
+  // marked as the selector marks its row, until an init frame reports running it
+  it('the model chip names a model asked for and not yet reported, marked setting…, until the engine reports it', async () => {
+    const direct = { mode: 'direct' as const, baseUrl: null, verified: 'direct' as const, autoModeServer: 'unknown' as const, localLane: null };
+    live(A, { status: { model: { requested: 'haiku', resolved: 'claude-sonnet' }, gateway: direct } });
+    mount([{ index: 0, id: A }]);
+    const chip = () => within(composerOf(0)).getByRole('button', { name: /^Model / });
+    await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model haiku, setting…'));
+    expect(chip().textContent).toBe('haikusetting…⌄');
+    live(A, { status: { model: { requested: 'haiku', resolved: 'claude-haiku-5-5' }, gateway: direct } }); // the next turn's init frame
+    await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model haiku'));
+    expect(chip().textContent).toBe('haiku⌄');
+  });
+
+  // The review of S-chip: the chip and the selector hold one rule on every path, through the request the selector holds
+  // (widgets/model.ts): a dormant choice while its session starts, a request with nothing reported yet, and Default.
+  describe('the model chip beside the real selector', () => {
+    const direct = { mode: 'direct' as const, baseUrl: null, verified: 'direct' as const, autoModeServer: 'unknown' as const, localLane: null };
+    let offs: (() => void)[] = [];
+    beforeEach(() => {
+      offs = [
+        registerSlashWidget('model', { title: 'Model', placement: 'modelChip', component: modelSelector('model') }),
+        registerSlashWidget('effort', { title: 'Effort', placement: 'modelChip', component: modelSelector('effort') }),
+      ];
+    });
+    afterEach(() => {
+      offs.forEach((off) => off());
+      resetModelRequests();
+    });
+    const chip = () => within(composerOf(0)).getByRole('button', { name: /^Model / });
+    const choose = async (name: RegExp) => {
+      act(() => requestChipWidget(A, 'model', ''));
+      fireEvent.click(await screen.findByRole('menuitemradio', { name }));
+    };
+    const SET = { ok: true, error: null, code: null };
+
+    it('a choice on a session with no ready process is named, marked, while the session starts for it', async () => {
+      live(A, { status: { process: 'exited', model: { requested: 'sonnet', resolved: 'claude-sonnet' }, gateway: direct } });
+      mount([{ index: 0, id: A }]);
+      await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model sonnet'));
+      await choose(/^Haiku/);
+      await waitFor(() => expect(fake.pending('session.acquire')).toBe(1)); // the start is held
+      await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model haiku, setting…'));
+      await act(() => fake.reply('session.acquire', { status: 'failed', appSessionId: A, message: 'The session did not become ready.', resources: { worktree: null, record: 'kept', transcript: 'kept' } }));
+      await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model sonnet')); // nothing applied: the request is gone
+    });
+
+    // S-R2-r2-i1: the report the session last made predates the choice, so it acknowledges nothing until set_model is accepted
+    it('choosing the model the session last reported is marked while the session starts for it, until set_model is accepted', async () => {
+      live(A, { status: { process: 'exited', model: { requested: null, resolved: 'claude-haiku-5-5' }, gateway: direct } });
+      mount([{ index: 0, id: A }]);
+      await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model haiku'));
+      await choose(/^Haiku/);
+      await waitFor(() => expect(fake.pending('session.acquire')).toBe(1)); // the start is held
+      await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model haiku, setting…'));
+      live(A, { status: { process: 'ready', model: { requested: null, resolved: 'claude-haiku-5-5' }, gateway: direct } });
+      await act(() => fake.reply('session.acquire', { status: 'ready', appSessionId: A, launched: true, joined: false }));
+      await waitFor(() => expect(fake.pending('session.setModel')).toBe(1));
+      expect(chip().getAttribute('aria-label')).toBe('Model haiku, setting…'); // acquired, set_model in flight
+      live(A, { status: { model: { requested: 'haiku', resolved: 'claude-haiku-5-5' }, gateway: direct } }); // the host's status after the answer
+      await act(() => fake.reply('session.setModel', SET));
+      await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model haiku'));
+    });
+
+    it('a model chosen before the engine has reported any is marked until it does', async () => {
+      live(A, { status: { model: { requested: null, resolved: null }, gateway: direct } });
+      mount([{ index: 0, id: A }]);
+      await choose(/^Haiku/);
+      await waitFor(() => expect(fake.pending('session.setModel')).toBe(1));
+      await act(() => fake.reply('session.setModel', SET));
+      live(A, { status: { model: { requested: 'haiku', resolved: null }, gateway: direct } }); // the host's status after the answer
+      await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model haiku, setting…'));
+      live(A, { status: { model: { requested: 'haiku', resolved: 'claude-haiku-5-5' }, gateway: direct } }); // the first init frame
+      await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model haiku'));
+    });
+
+    it('Default chosen over another model names what Default runs, marked until the engine runs it', async () => {
+      live(A, { status: { model: { requested: 'haiku', resolved: 'claude-haiku-5-5' }, gateway: direct } });
+      mount([{ index: 0, id: A }]);
+      await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model haiku'));
+      await choose(/^Default/);
+      await waitFor(() => expect(invoked('session.setModel')).toEqual([{ appSessionId: A, model: null }]));
+      await act(() => fake.reply('session.setModel', SET));
+      live(A, { status: { model: { requested: null, resolved: 'claude-haiku-5-5' }, gateway: direct } }); // the host records the null request
+      await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model sonnet, setting…'));
+      live(A, { status: { model: { requested: null, resolved: 'claude-sonnet' }, gateway: direct } }); // the next turn's init frame
+      await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model sonnet'));
+    });
+  });
+
+  // W3 (C4): the chip names the effort get_settings applied, and opens the selector C11 registers in its own menu, as
+  // `/model` from the editor does
+  it('the model chip reads `<alias> <effort>` and opens the registered selector, from the chip and from `/model`', async () => {
+    live(A, { status: { model: { requested: null, resolved: 'claude-sonnet' } } });
+    const off = registerSlashWidget('model', { title: 'Model', placement: 'modelChip', component: ({ args }) => <p>selector {args || '(none)'}</p> });
+    const offEffort = registerSlashWidget('effort', { title: 'Effort', placement: 'modelChip', component: () => <p>effort view</p> });
+    try {
+      mount([{ index: 0, id: A }]);
+      const chip = () => within(composerOf(0)).getByRole('button', { name: /^Model / });
+      await waitFor(() => expect(fake.pending('session.getSettings')).toBe(1));
+      await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model sonnet-relay')); // the relay's row names it (the stub catalogue); the effort is not known yet
+      await act(() => fake.reply('session.getSettings', { effective: {}, sources: [], applied: { model: 'claude-sonnet', effort: 'high', advisor: null, ultracode: false } }));
+      await waitFor(() => expect(chip().getAttribute('aria-label')).toBe('Model sonnet-relay high'));
+      expect(invoked('session.getSettings')).toEqual([{ appSessionId: A }]); // once, at ready
+      await userEvent.click(chip());
+      expect(await screen.findByText('effort view')).toBeTruthy(); // the chip opens on the effort view (Codex's)
+      await userEvent.keyboard('{Escape}');
+      await waitFor(() => expect(screen.queryByText('effort view')).toBeNull());
+      act(() => void useComposerStore.getState().focusTargets.get(A)!.openWidget!('model', 'opus'));
+      expect(await screen.findByText('selector opus')).toBeTruthy(); // `/model opus` opens in the chip's menu, never in the box
+      expect(within(composerOf(0)).queryByText('selector opus')).toBeNull();
+    } finally {
+      off();
+      offEffort();
+    }
+  });
+
+  // W3 (C5): the host fell back from a refused auto (requested auto, the fallback effective, the refusal): the dock says so
+  // in Claude Desktop's words, the chip shows the mode with the refusal, and the note can be put away
+  it.each([['acceptEdits', 'Accept edits'], ['plan', 'Plan'], ['bypassPermissions', 'Bypass permissions'], ['default', 'Manual']] as const)('names the refused-auto fallback %s by its label and lets the notice be dismissed', async (mode, label) => {
+    live(A, { status: { permissionMode: { requested: 'auto', effective: mode, refusal: 'auto_mode_model' } } });
+    mount([{ index: 0, id: A }]);
+    const note = within(composerOf(0)).getByRole('note', { name: 'Permission mode notice' });
+    expect(note.textContent).toContain(`Auto mode isn't available for this session. Using ${label} instead.`);
+    expect(within(composerOf(0)).getByRole('button', { name: /^Permission mode / }).getAttribute('aria-label')).toBe(`Permission mode ${label} · This model does not support auto mode`);
+    await userEvent.click(within(note).getByRole('button', { name: 'Dismiss' }));
+    expect(within(composerOf(0)).queryByRole('note', { name: 'Permission mode notice' })).toBeNull();
+  });
+
+  // E11 F2b (plan 2.4): an error seen in its session stays as the notice above the frame until dismissed or the next turn
+  it('keeps an error it has seen as its notice, and drops it once dismissed', () => {
+    live(A);
+    const error = item(A, 'error', '2026-10-08T10:00:00.000Z', { summary: 'The turn ended with an error', state: 'confirmed', request: { requestId: null, toolUseId: null, taskId: null, agentId: null } });
+    useAttention.setState((s) => ({ bySession: new Map(s.bySession).set(A, [error]), version: s.version + 1 }));
+    mount([{ index: 0, id: A }]);
+    expect(within(composerOf(0)).getByText('The turn ended with an error')).toBeTruthy();
+    act(() => useAttention.setState((s) => ({ bySession: new Map(s.bySession).set(A, [{ ...error, state: 'retired' }]), version: s.version + 1 })));
+    expect(within(composerOf(0)).queryByText('The turn ended with an error')).toBeNull();
+  });
+
+  it('renews the route’s catalogue when the process becomes ready, not at each mount of a ready session', async () => {
+    live(A, { status: { process: 'initializing' } });
+    const view = mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(invoked('engine.models')).toHaveLength(1));
+    live(A); // ready: the launch's initialize has updated the route's catalogue
+    await waitFor(() => expect(invoked('engine.models')).toHaveLength(2));
+    view.unmount();
+    mount([{ index: 0, id: A }]); // a tab switch back: the cached catalogue stands
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(invoked('engine.models')).toHaveLength(2);
+  });
+
+  it('keeps `!` enabled while busy as Run, and the control says it runs now inside the turn', async () => {
+    busy(A);
+    mount([{ index: 0, id: A }]);
+    await type('!ls');
+    await waitFor(() => expect(primary().textContent).toBe('Run'));
+    expect(primary().disabled).toBe(false);
+    expect(primary().title).toBe('Runs now; the model sees the output in this turn (Enter)');
+    expect(primary().getAttribute('aria-description')).toBe('Runs now; the model sees the output in this turn');
+  });
+
+  it('shows the engine’s effective mode with the refusal in words, and the "+" menu’s Add directory… adds to the engine’s directories', async () => {
+    live(A, { status: { permissionMode: { requested: 'auto', effective: 'default', refusal: 'auto_mode_model' } } });
+    mount([{ index: 0, id: A }]);
+    const chip = within(composerOf(0)).getByRole('button', { name: /^Permission mode Manual/ });
+    expect(chip.getAttribute('aria-label')).toBe('Permission mode Manual · This model does not support auto mode');
+    expect(invoked('session.listPermissionRules')).toEqual([]); // no engine read on mount
+    expect(invoked('session.listModels')).toEqual([]);
+    expect(within(composerOf(0)).queryByRole('button', { name: 'Add a directory' })).toBeNull(); // W10: no `+ dir` chip
+    const user = userEvent.setup();
+    await user.click(within(composerOf(0)).getByRole('button', { name: /^Location/ }));
+    await waitFor(() => expect(invoked('session.listPermissionRules')).toHaveLength(1)); // read as the popover opens
+    await waitFor(() => expect(within(screen.getByRole('dialog', { name: 'Location' })).getByRole('list', { name: 'Additional directories' }).textContent).toContain('/work/app-a/extra'));
+    await user.keyboard('{Escape}');
+    await user.click(plusOf());
+    await user.click(await screen.findByRole('menuitem', { name: 'Add directory…' }));
+    await waitFor(() => expect(invoked('layout.pickFiles')).toEqual([{ kind: 'directory', directory: '/work/app-a', multiple: false }]));
+    await waitFor(() => expect(invoked('session.applyFlagSettings')).toEqual([{ appSessionId: A, settings: { permissions: { additionalDirectories: ['/work/app-a/extra', '/work/picked'] } } }]));
+    await waitFor(() => expect(invoked('session.listPermissionRules')).toHaveLength(3)); // read at the change, and again afterwards
+    await user.click(chip);
+    await waitFor(() => expect(invoked('session.listModels')).toHaveLength(1)); // the mode menu reads the models as it opens
+  });
+
+  // P2-A M3 review (acceptance 5): on a session with no ready process the chosen directory starts it first, said beside the "+"
+  it('Add directory… on an exited session says Starting… after the choice while the session starts, then adds it', async () => {
+    live(A, { status: { process: 'exited' } });
+    mount([{ index: 0, id: A }]);
+    const user = userEvent.setup();
+    expect(await addDirectoryState(user)).toBeNull(); // offered: the choice starts the session
+    await user.click(plusOf());
+    await user.click(await screen.findByRole('menuitem', { name: 'Add directory…' }));
+    await waitFor(() => expect(invoked('session.acquire')).toEqual([{ appSessionId: A, reason: 'chip' }])); // after the picker answered
+    expect(invoked('layout.pickFiles')).toHaveLength(1);
+    const phase = composerOf(0).querySelector('[data-add-directory-phase]');
+    expect(phase?.textContent).toBe('Starting…');
+    expect(invoked('session.applyFlagSettings')).toEqual([]);
+    await act(() => fake.reply('session.acquire', { status: 'ready', appSessionId: A, launched: true, joined: false }));
+    await waitFor(() => expect(invoked('session.applyFlagSettings')).toEqual([{ appSessionId: A, settings: { permissions: { additionalDirectories: ['/work/app-a/extra', '/work/picked'] } } }]));
+    await waitFor(() => expect(composerOf(0).querySelector('[data-add-directory-phase]')).toBeNull());
+  });
+
+  // W10 (C10): "model matters a bit more": the model chip toward the middle, the context ring at the outermost edge
+  it('orders the toolbar + · location · mode · mic … model · context ring, the ring last', async () => {
+    live(A);
+    mount([{ index: 0, id: A }]);
+    const toolbar = within(composerOf(0)).getByRole('toolbar', { name: 'Composer tools' });
+    await waitFor(() => expect(within(toolbar).getByRole('button', { name: /^Context window/ })).toBeTruthy());
+    const labels = within(toolbar).getAllByRole('button').map((b) => b.getAttribute('aria-label') ?? '');
+    // E9: the microphone after the permission mode (and a plugin's mode slot), before the spacer
+    expect(labels).toEqual(['Add files, photos or commands', expect.stringMatching(/^Location /), expect.stringMatching(/^Permission mode /), 'Dictate', expect.stringMatching(/^Model /), expect.stringMatching(/^Context window/)]);
+  });
+
+  // W10 (C9): on an unstarted tab Add directory… patches the intent, and the project row lists the directories read-only
+  it('adds a directory to an unstarted tab’s intent from the "+" menu, listed in the project row’s tooltip and menu', async () => {
+    const stub = stubIntent({ additionalDirectories: ['/work/other'] });
+    mount([{ index: 0, id: A }]);
+    const user = userEvent.setup();
+    await user.click(plusOf());
+    await user.click(await screen.findByRole('menuitem', { name: 'Add directory…' }));
+    await waitFor(() => expect(stub.patch).toHaveBeenCalledWith({ additionalDirectories: ['/work/other', '/work/picked'] }));
+    expect(invoked('session.applyFlagSettings')).toEqual([]);
+  });
+});
+
+describe('one Stop handler for every pane', () => {
+  const tabs = (focusedPane: 0 | 1) =>
+    useLayout.setState((s) => ({
+      main: {
+        ...s.main,
+        current: 'none',
+        sets: {
+          none: {
+            panes: [
+              { tabs: [{ id: `session:${A}`, kind: 'session', appSessionId: A, pinned: false }], activeTabId: `session:${A}` },
+              { tabs: [{ id: `session:${B}`, kind: 'session', appSessionId: B, pinned: false }], activeTabId: `session:${B}` },
+            ],
+            focusedPane,
+            splitRatio: 0.5,
+          },
+        },
+      },
+    }));
+
+  it('interrupts the focused pane’s session from its editor, whichever composer mounted last, and nothing for an idle one', async () => {
+    busy(A);
+    busy(B);
+    tabs(1);
+    const view = mount([{ index: 1, id: B }, { index: 0, id: A }], <ComposerAppKeys />); // pane 1 first: registration order against focus
+    expect(bindingsOf('composer.stop')).toHaveLength(1);
+    act(() => editorOf(1).focus());
+    await key(editorOf(1), { key: '.', code: 'Period', metaKey: true });
+    expect(invoked('session.interrupt')).toEqual([{ appSessionId: B, cancelEngineQueued: false, holdEngineQueued: true }]); // the plain stop holds waiting steers (W1)
+    act(() => editorOf(0).focus()); // focus moves to pane 0: C5's pane corrects focusedPane on focusin
+    expect(currentSet(useLayout.getState().main).focusedPane).toBe(0);
+    await key(editorOf(0), { key: '.', code: 'Period', metaKey: true });
+    expect(invoked('session.interrupt')).toEqual([
+      { appSessionId: B, cancelEngineQueued: false, holdEngineQueued: true },
+      { appSessionId: A, cancelEngineQueued: false, holdEngineQueued: true },
+    ]);
+
+    live(A); // idle
+    await key(editorOf(0), { key: '.', code: 'Period', metaKey: true });
+    expect(invoked('session.interrupt')).toHaveLength(2);
+    view.unmount();
+    expect(bindingsOf('composer.stop')).toHaveLength(0);
+  });
+
+  it('holds one registration however many composers mount and unmount', async () => {
+    busy(A);
+    tabs(0);
+    const first = mount([{ index: 0, id: A }], <ComposerAppKeys />);
+    const second = render(
+      <QueryClientProvider client={queryClient}>
+        <Composer appSessionId={B} paneIndex={1} />
+      </QueryClientProvider>,
+    );
+    expect(bindingsOf('composer.stop')).toHaveLength(1);
+    second.unmount();
+    expect(bindingsOf('composer.stop')).toHaveLength(1);
+    first.unmount();
+  });
+
+  it('calls nothing for an unstarted focused session, and ⌘L focuses the focused pane’s editor', async () => {
+    tabs(0);
+    mount([{ index: 0, id: A }], <ComposerAppKeys />); // no status, no record: nothing to interrupt
+    await key(document.body, { key: '.', code: 'Period', metaKey: true });
+    expect(invoked('session.interrupt')).toEqual([]);
+    await key(document.body, { key: 'l', code: 'KeyL', metaKey: true });
+    await waitFor(() => expect(editorOf(0).editor.isFocused).toBe(true));
+  });
+});
+
+// A stub of C10's hook over a small mutable intent: `start` answers when the test says.
+function stubIntent(over: Partial<SetupIntentHook['intent']> = {}, options: Partial<SetupIntentHook['options']> = {}) {
+  let resolveStart: ((r: HookResult) => void) | null = null;
+  const state = {
+    intent: { location: { kind: 'directory' as const, path: '/repo' }, additionalDirectories: [], model: null, effort: null, permissionMode: null, message: null, draft: null, ...over } as SetupIntentHook['intent'],
+    listeners: new Set<() => void>(),
+    phase: null as string | null,
+  };
+  const patch = vi.fn<(p: SetupIntentPatch) => Promise<HookResult>>(async () => ({ ok: true }));
+  const start = vi.fn(() => new Promise<HookResult>((resolve) => (resolveStart = resolve)));
+  const set = (next: Partial<SetupIntentHook['intent']>) => {
+    state.intent = { ...state.intent, ...next };
+    state.listeners.forEach((l) => l());
+  };
+  // read through useSyncExternalStore, as C10's hook reads its stores: a render that read `state` directly would be
+  // memoized by the React Compiler (vitest's `renderer-compiled`) and never see a later `set`
+  const subscribe = (listener: () => void) => {
+    state.listeners.add(listener);
+    return () => void state.listeners.delete(listener);
+  };
+  function useStub(): SetupIntentHook {
+    const intent = useSyncExternalStore(subscribe, () => state.intent);
+    const phase = useSyncExternalStore(subscribe, () => state.phase);
+    return { intent, options: { models: [], autoModeNote: null, ...options }, phase, patch, start };
+  }
+  registerSetupIntentHook((id) => (id === A ? useStub() : null)); // a hook, registered as C10's is
+  const setPhase = (phase: string | null) => {
+    state.phase = phase;
+    state.listeners.forEach((l) => l());
+  };
+  return { patch, start, set, setPhase, answer: (r: HookResult) => act(async () => resolveStart?.(r)) };
+}
+
+describe('unstarted send holds a starting state', () => {
+  it('starts through C10 in the same tick, refuses a second Enter and a keystroke while starting, and keeps the text on a refusal', async () => {
+    const stub = stubIntent();
+    mount([{ index: 0, id: A }]);
+    await type('first message');
+    const editor = editorOf();
+    act(() => editor.focus());
+    act(() => void editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })));
+    // before any microtask: the gate is set and C10 has the message
+    expect(isStarting(useComposerStore.getState(), A)).toBe(true);
+    expect(stub.start).toHaveBeenCalledWith({ content: 'first message', display: 'first message' });
+    await waitFor(() => expect(primary().textContent).toBe('Starting…'));
+    expect(primary().disabled).toBe(true);
+    expect(await addDirectoryState()).toBe('Session is starting…'); // W10: the "+" menu's item is gated as every chip is
+    expect(within(composerOf(0)).getByRole('button', { name: /^Location/ }).title).toContain('Session is starting…');
+    await key(editor, { key: 'Enter' });
+    expect(editor.getAttribute('contenteditable')).toBe('false'); // read-only: a keystroke changes nothing
+    expect(stub.start).toHaveBeenCalledTimes(1);
+    expect(editor.editor.getText()).toBe('first message');
+
+    await stub.answer({ ok: false, error: 'missing_directory: /repo is gone' });
+    await waitFor(() => expect(isStarting(useComposerStore.getState(), A)).toBe(false));
+    expect(editor.editor.getText()).toBe('first message');
+    expect(primary().disabled).toBe(false);
+    expect(await addDirectoryState()).toBeNull();
+    expect(useNotices.getState().notices.map((n) => [n.text, n.actions.map((a) => a.label)])).toEqual([['missing_directory: /repo is gone', ['Retry']]]);
+  });
+
+  it('clears on an accepted start and stays gated while C10 holds the message, until it lets go', async () => {
+    const stub = stubIntent();
+    mount([{ index: 0, id: A }]);
+    await type('go');
+    await key(editorOf(), { key: 'Enter' });
+    act(() => stub.set({ message: { content: 'go', display: 'go' } }));
+    await stub.answer({ ok: true });
+    await waitFor(() => expect(editorOf().editor.getText()).toBe(''));
+    expect(invoked('session.history.append')).toEqual([{ appSessionId: A, display: 'go', pastedContents: {}, project: '/repo' }]);
+    expect(primary().title).toBe('Your first message is with the setup above');
+    expect(primary().disabled).toBe(true);
+    expect(await addDirectoryState()).toBe('Your first message is with the setup above');
+    act(() => stub.set({ message: null }));
+    await type('again');
+    await waitFor(() => expect(primary().disabled).toBe(false));
+  });
+
+  it('keeps its draft in the intent, never in C4’s drafts, and prefills through it', async () => {
+    const stub = stubIntent({ draft: { doc: docOf([paragraph(textNode('kept in the intent'))]), attachments: [], updatedAt: '2026-09-29T10:00:00.000Z' } });
+    mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(editorOf().editor.getText()).toBe('kept in the intent'));
+    vi.useFakeTimers();
+    for (const c of ['a', 'b', 'c', 'd', 'e']) {
+      await type(c);
+      act(() => void vi.advanceTimersByTime(100));
+    }
+    expect(stub.patch).not.toHaveBeenCalled();
+    act(() => void vi.advanceTimersByTime(750));
+    expect(stub.patch).toHaveBeenCalledTimes(1);
+    expect(stub.patch.mock.calls[0][0]).toMatchObject({ draft: { doc: { type: 'doc' } } });
+    act(() => prefillComposer(A, { text: 'handed back' }));
+    act(() => void vi.advanceTimersByTime(800));
+    expect(stub.patch).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(stub.patch.mock.calls[1][0])).toContain('handed back');
+    expect(invoked('session.drafts.set')).toEqual([]);
+    expect(invoked('session.drafts.get')).toEqual([]);
+  });
+
+  // W3 (B6): the composer has no edit mode; a draft written before W3 may still carry one, which loads as plain text
+  it('a draft that carries the retired edit mode restores its text and nothing of the edit', async () => {
+    const doc = { ...docOf([paragraph(textNode('kept in the intent'))]), attrs: { attachments: [], editing: { messageUuid: 'u-1', seenCursor: 'u-1' } } };
+    stubIntent({ draft: { doc, attachments: [], updatedAt: '2026-09-29T10:00:00.000Z' } });
+    mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(editorOf().editor.getText()).toBe('kept in the intent'));
+    expect(composerOf(0).querySelector('[data-edit-mode]')).toBeNull();
+    expect(useComposerStore.getState().inlineEdits.size).toBe(0);
+    expect(invoked('session.drafts.set')).toEqual([]);
+  });
+
+  it('restores no draft while C10 holds the first message (its intent may still carry the sent text)', async () => {
+    const draft = { doc: docOf([paragraph(textNode('the sent text'))]), attachments: [], updatedAt: '2026-09-29T10:00:00.000Z' };
+    stubIntent({ draft, message: { content: 'the sent text', display: 'the sent text' } });
+    mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(primary().title).toBe('Your first message is with the setup above'));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0))); // the draft's load has answered
+    expect(editorOf().editor.getText()).toBe('');
+  });
+
+  it('writes no draft while starting, and none after an accepted start (C10 holds the message and refuses a patch meanwhile)', async () => {
+    const stub = stubIntent();
+    mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(editorOf()).toBeTruthy());
+    vi.useFakeTimers();
+    await type('sent before the pause'); // a draft write is pending (750 ms)
+    act(() => void vi.advanceTimersByTime(300));
+    act(() => editorOf().focus());
+    await key(editorOf(), { key: 'Enter' });
+    expect(stub.start).toHaveBeenCalledTimes(1);
+    act(() => void vi.advanceTimersByTime(2_000));
+    expect(stub.patch).not.toHaveBeenCalled(); // the submission cancelled the pending write
+    act(() => stub.set({ message: { content: 'sent before the pause', display: 'sent before the pause' } }));
+    await stub.answer({ ok: true });
+    act(() => void vi.advanceTimersByTime(2_000));
+    expect(editorOf().editor.getText()).toBe('');
+    expect(stub.patch).not.toHaveBeenCalled(); // no `patch({ draft: null })`: the intent's draft is left alone
+  });
+
+  it('writes the kept text again after a refused start', async () => {
+    const stub = stubIntent();
+    mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(editorOf()).toBeTruthy());
+    vi.useFakeTimers();
+    await type('kept');
+    act(() => editorOf().focus());
+    await key(editorOf(), { key: 'Enter' });
+    await stub.answer({ ok: false, error: 'invalid: bad location' });
+    expect(stub.patch).not.toHaveBeenCalled();
+    act(() => void vi.advanceTimersByTime(800));
+    expect(stub.patch).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(stub.patch.mock.calls[0][0])).toContain('kept');
+  });
+
+  it("shows C10's setup phases on the submit control while the setup runs, then the held message's reason", async () => {
+    const stub = stubIntent();
+    mount([{ index: 0, id: A }]);
+    await type('go');
+    await key(editorOf(), { key: 'Enter' });
+    act(() => stub.set({ message: { content: 'go', display: 'go' } }));
+    await stub.answer({ ok: true });
+    for (const phase of ['Creating worktree one…', 'Trusting /repo…', 'Starting…']) {
+      act(() => stub.setPhase(phase));
+      await waitFor(() => expect(primary().title).toBe(phase));
+      expect(primary().textContent).toBe('Starting…');
+      expect(primary().disabled).toBe(true);
+    }
+    act(() => stub.setPhase(null));
+    await waitFor(() => expect(primary().title).toBe('Your first message is with the setup above'));
+  });
+
+  // W2 (C3): with no status line, the setup's phase shows in the composer's dock above the frame, before the record
+  // exists and after (the record exists from the launch, before C3's first status), and only while it runs.
+  it('the setup phase shows in the composer’s dock above the frame while it runs, before and after the record exists', async () => {
+    const stub = stubIntent();
+    const view = mount([{ index: 0, id: A }]);
+    const setup = () => within(composerOf(0)).queryByRole('status', { name: 'Setup' });
+    expect(setup()).toBeNull(); // nothing at rest: the unstarted tab is the heading and the frame
+    act(() => stub.setPhase('Creating worktree one…'));
+    await waitFor(() => expect(setup()?.textContent).toBe('Creating worktree one…'));
+    expect(setup()!.compareDocumentPosition(composerOf(0).querySelector('[data-composer-frame]')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    act(() => stub.setPhase(null));
+    await waitFor(() => expect(setup()).toBeNull());
+    view.unmount();
+    useSessions.setState({ records: new Map([[A, record(A)]]), engine: new Map() });
+    mount([{ index: 0, id: A }]);
+    act(() => stub.setPhase('Starting…'));
+    await waitFor(() => expect(setup()?.textContent).toBe('Starting…'));
+    act(() => stub.setPhase(null));
+    await waitFor(() => expect(setup()).toBeNull());
+  });
+
+  // C10's M6 finding: a failed setup keeps its tab and its intent, and C3 keeps the failed launch's exited status for
+  // the id; with no record the tab is still unstarted (C5's pane rule), so the composer stays bound to the intent.
+  it('binds the intent on a failed setup’s retained tab (an exited status, no record): editable chips, Send, and its draft in the intent', async () => {
+    const stub = stubIntent();
+    const s = useSessions.getState();
+    useSessions.setState({ engine: new Map(s.engine).set(A, { ...status(A), process: 'exited' }) });
+    mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(editorOf()).toBeTruthy());
+    const location = within(composerOf(0)).getByRole('button', { name: /^Location/ });
+    expect(location.title).toBe('/repo · Where this session will run');
+    expect(await addDirectoryState()).toBeNull();
+    vi.useFakeTimers();
+    await type('after the failure');
+    expect(primary().textContent).toBe('Send');
+    expect(primary().disabled).toBe(false);
+    act(() => void vi.advanceTimersByTime(800));
+    expect(stub.patch).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(stub.patch.mock.calls[0][0])).toContain('after the failure');
+    expect(invoked('session.drafts.set')).toEqual([]);
+    vi.useRealTimers();
+    act(() => editorOf().focus());
+    await key(editorOf(), { key: 'Enter' });
+    expect(stub.start).toHaveBeenCalledWith({ content: 'after the failure', display: 'after the failure' });
+    await stub.answer({ ok: true }); // the session-owned flight outlives unmount; settle this test's start
+  });
+
+  // The C7/C10 seam: a chip opened on the intent's frame reads nothing from the engine, so the live frame that replaces
+  // it at launch does not read either until a chip opens there; a read at launch would race C10's first message.
+  it('reads no engine lists at launch for a chip opened while unstarted, only when one opens on the live frame', async () => {
+    stubIntent();
+    mount([{ index: 0, id: A }]);
+    const user = userEvent.setup();
+    await user.click(within(composerOf(0)).getByRole('button', { name: /^Location/ }));
+    await user.keyboard('{Escape}');
+    await user.click(within(composerOf(0)).getByRole('button', { name: /^Permission mode/ }));
+    await user.keyboard('{Escape}');
+    live(A);
+    await waitFor(() => expect(within(composerOf(0)).getByRole('button', { name: /^Context window/ })).toBeTruthy()); // the live frame (its ring) replaced the intent's
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(invoked('session.listPermissionRules')).toEqual([]);
+    expect(invoked('session.listModels')).toEqual([]);
+    await user.click(within(composerOf(0)).getByRole('button', { name: /^Location/ }));
+    await waitFor(() => expect(invoked('session.listPermissionRules')).toHaveLength(1));
+  });
+
+  // New chat (2026-10-01, the owner's ruling): the chip only reads; worktrees and branches are no longer listed in it
+  it('the location chip names the directory, the path in its tooltip and popover, and offers no worktree or branch choice', async () => {
+    const repo = '/Users/owner/code/repo';
+    stubIntent({ location: { kind: 'directory', path: repo } });
+    mount([{ index: 0, id: A }]);
+    const chip = within(composerOf(0)).getByRole('button', { name: `Location ${repo}` });
+    expect(chip.textContent).toBe('repo⌄'); // the name; the path is the tooltip and the popover's first line; W9 (H2): no branch, no placeholder
+    expect(chip.title).toBe(`${repo} · Where this session will run`);
+    const user = userEvent.setup();
+    await user.click(chip);
+    const popover = screen.getByRole('dialog', { name: 'Location' });
+    expect(within(popover).getByText(repo)).toBeTruthy();
+    expect(within(popover).queryByRole('menuitemradio')).toBeNull();
+    expect(within(popover).queryByRole('textbox')).toBeNull(); // no new-worktree name, no branch search
+  });
+
+  it('holds `!` and `#` until the session starts, and hides the queue', async () => {
+    stubIntent();
+    mount([{ index: 0, id: A }]);
+    await type('!ls');
+    await waitFor(() => expect(primary().title).toBe('Available once the session starts'));
+    expect(primary().disabled).toBe(true);
+    expect(within(composerOf(0)).queryByRole('region', { name: 'Queued messages' })).toBeNull();
+    expect(invoked('session.queue.list')).toEqual([{ appSessionId: A }]); // read, but an unstarted session lists nothing
+  });
+});
+
+// P2-A start (2026-10-09; the execution document §5.4, superseding C12's send-to-resume): Send on a session with a
+// record and no ready process acquires it through the human seam, then sends; the text stays in the locked editor until
+// the host accepts it. `!` and `#` acquire too. Archived and foreign-held sessions refuse with their words.
+describe('Send on a session with a record and no ready process', () => {
+  const exitedBy = (appSessionId: AppSessionId, reason: 'budget' | 'stop' | 'crash') =>
+    live(appSessionId, { status: { process: 'exited', exit: { code: 0, signal: null, reason, at: '2026-09-29T14:02:00.000Z', release: null } } });
+  const READY = { status: 'ready', appSessionId: A, launched: true, joined: false };
+  beforeEach(() => useSetup.setState({ cards: new Map() }));
+
+  it.each(['budget', 'stop', 'crash'] as const)('an exited session (%s) starts on Send: the text stays locked until the host accepts it, then clears and is recorded', async (reason) => {
+    exitedBy(A, reason);
+    mount([{ index: 0, id: A }]);
+    await type('carry on');
+    await waitFor(() => expect(primary().disabled).toBe(false));
+    expect(primary().getAttribute('aria-description')).toBe('Starts this session');
+    await key(editorOf(), { key: 'Enter' });
+    await waitFor(() => expect(fake.pending('session.acquire')).toBe(1));
+    expect(invoked('session.acquire')).toEqual([{ appSessionId: A, reason: 'send' }]);
+    expect(editorOf().editor.getText()).toBe('carry on');
+    await act(() => fake.reply('session.acquire', READY));
+    await waitFor(() => expect(editorOf().editor.getText()).toBe(''));
+    expect(invoked('session.send')).toEqual([{ appSessionId: A, content: 'carry on' }]);
+    expect(invoked('session.history.append')).toEqual([{ appSessionId: A, display: 'carry on', pastedContents: {} }]);
+  });
+
+  it('a trust card holds the message: nothing is sent, the editor and its draft keep the text', async () => {
+    exitedBy(A, 'stop');
+    mount([{ index: 0, id: A }]);
+    await type('carry on');
+    await key(editorOf(), { key: 'Enter' });
+    await waitFor(() => expect(fake.pending('session.acquire')).toBe(1));
+    await act(() => fake.reply('session.acquire', { status: 'needs_trust', appSessionId: A, trust: trustState() }));
+    await waitFor(() => expect(useSetup.getState().cards.get(A)).toMatchObject({ kind: 'trust', message: { content: 'carry on', display: 'carry on' } }));
+    expect(editorOf().editor.getText()).toBe('carry on');
+    expect(invoked('session.send')).toEqual([]);
+    expect(invoked('session.history.append')).toEqual([]);
+    await waitFor(() => expect(JSON.stringify(invoked('session.drafts.set').at(-1))).toContain('carry on'), { timeout: 3_000 });
+    expect(useNotices.getState().notices).toEqual([]);
+  });
+
+  it('a refusal says why with Retry, and the text stays', async () => {
+    exitedBy(A, 'stop');
+    mount([{ index: 0, id: A }]);
+    await type('carry on');
+    await key(editorOf(), { key: 'Enter' });
+    await waitFor(() => expect(fake.pending('session.acquire')).toBe(1));
+    await act(() => fake.reply('session.acquire', { status: 'missing_directory', appSessionId: A, directory: '/work/gone' }));
+    await waitFor(() => expect(useNotices.getState().notices.map((n) => [n.text, n.actions.map((a) => a.label)])).toEqual([['Directory not found: /work/gone', ['Retry']]]));
+    expect(editorOf().editor.getText()).toBe('carry on');
+    expect(invoked('session.send')).toEqual([]);
+  });
+
+  it('an archived session and a foreign-held one refuse Send with their words', () => {
+    exitedBy(A, 'stop');
+    live(B, { status: { process: 'exited' }, record: { holder: { kind: 'terminal', pid: 42 } } });
+    useSessions.getState().applyDigest(digest(A, { phase: 'exited', availability: 'archived' }));
+    useSessions.getState().applyDigest(digest(B, { phase: 'foreign', availability: 'foreign_held' }));
+    mount([{ index: 0, id: A }, { index: 1, id: B }]);
+    for (const [pane, words] of [[0, 'Archived · unarchive it to continue'], [1, 'Held by terminal · 42']] as const) {
+      expect(primary(pane).title).toBe(words);
+      expect(primary(pane).disabled).toBe(true);
+    }
+  });
+
+  it('a start in flight reads Starting… and Send stays enabled to join it', async () => {
+    exitedBy(A, 'stop');
+    useSessions.getState().applyDigest(digest(A, { phase: 'exited', availability: 'starting' }));
+    mount([{ index: 0, id: A }]);
+    await type('carry on');
+    await waitFor(() => expect(primary().disabled).toBe(false));
+    expect(primary().textContent).toBe('Starting…');
+    expect(primary().getAttribute('aria-description')).toBe('Sends once the session has started');
+  });
+
+  it('`!` acquires before it runs; a trust card it meets carries no message and the text stays', async () => {
+    exitedBy(A, 'stop');
+    mount([{ index: 0, id: A }]);
+    await type('!ls');
+    await waitFor(() => expect(primary().disabled).toBe(false));
+    expect(primary().getAttribute('aria-description')).toBe('Starts this session');
+    await key(editorOf(), { key: 'Enter' });
+    await waitFor(() => expect(fake.pending('session.acquire')).toBe(1));
+    await act(() => fake.reply('session.acquire', { status: 'needs_trust', appSessionId: A, trust: trustState() }));
+    await waitFor(() => expect(useSetup.getState().cards.get(A)).toMatchObject({ kind: 'trust', message: null }));
+    expect(editorOf().editor.getText()).toBe('!ls');
+    expect(invoked('session.bash')).toEqual([]);
+    expect(invoked('session.send')).toEqual([]);
+  });
+
+  it('`!` on an exited session runs once the acquisition answers ready', async () => {
+    exitedBy(A, 'stop');
+    mount([{ index: 0, id: A }]);
+    await type('!ls');
+    await key(editorOf(), { key: 'Enter' });
+    await waitFor(() => expect(fake.pending('session.acquire')).toBe(1));
+    await act(() => fake.reply('session.acquire', READY));
+    await waitFor(() => expect(invoked('session.bash')).toEqual([{ appSessionId: A, command: 'ls' }]));
+    await act(() => fake.reply('session.bash', { commandUuid: '22222222-2222-4222-8222-222222222222' }));
+    await waitFor(() => expect(editorOf().editor.getText()).toBe(''));
+  });
+});
+// P2-A end
+
+// P2-F (L116): the seam's state refusal comes before the size pre-check, so an oversized Enter on a session that can
+// neither send nor start (no record; its process ended or starting) keeps the draft quietly, as a normal one does
+describe('an oversized draft on a session the seam refuses by state', () => {
+  it.each(['exited', 'starting'] as const)('Enter on a session %s with no record keeps the draft, with no warning and nothing dispatched', async (process) => {
+    useSessions.setState({ engine: new Map(useSessions.getState().engine).set(A, { ...status(A), process }) });
+    mount([{ index: 0, id: A }]);
+    const oversized = 'x'.repeat(1024 * 1024 + 1);
+    await type(oversized);
+    await key(editorOf(), { key: 'Enter' });
+    await act(async () => {});
+    expect(editorOf().editor.getText()).toBe(oversized);
+    expect(useNotices.getState().notices).toEqual([]);
+    expect(invoked('session.send')).toEqual([]);
+    expect(invoked('session.steer')).toEqual([]);
+    expect(invoked('session.history.append')).toEqual([]);
+  });
+
+  it('a ready session, and one with a record that would start, refuse it with the size warning before any dispatch or start', async () => {
+    live(A);
+    live(B, { status: { process: 'exited' } });
+    mount([{ index: 0, id: A }, { index: 1, id: B }]);
+    const oversized = 'x'.repeat(1024 * 1024 + 1);
+    for (const pane of [0, 1] as const) {
+      await type(oversized, pane);
+      await key(editorOf(pane), { key: 'Enter' });
+    }
+    await waitFor(() => expect(useNotices.getState().notices.filter((n) => n.text.startsWith('Message too large'))).toHaveLength(2));
+    expect(editorOf(0).editor.getText()).toBe(oversized);
+    expect(editorOf(1).editor.getText()).toBe(oversized);
+    expect(invoked('session.send')).toEqual([]);
+    expect(invoked('session.steer')).toEqual([]);
+    expect(invoked('session.acquire')).toEqual([]);
+  });
+});
+
+// E9 start: push-to-talk dictation through the composer (E9 execution document, Design §6 to §8): the one app-level hold
+// resolves the focused pane's session, writes into that composer only, and shows its state in that toolbar; the
+// toolbar's microphone toggles a capture for its own session on click (the owner's ruling, 2026-10-06).
+describe('dictation into the focused pane’s composer', () => {
+  const focusTabs = (focusedPane: 0 | 1, ids: AppSessionId[]) =>
+    useLayout.setState((s) => ({
+      main: {
+        ...s.main,
+        current: 'none',
+        sets: {
+          none: {
+            panes: ids.map((id) => ({ tabs: [{ id: `session:${id}`, kind: 'session' as const, appSessionId: id, pinned: false }], activeTabId: `session:${id}` })) as TabSet['panes'], // one or two
+            focusedPane,
+            splitRatio: 0.5,
+          },
+        },
+      },
+    }));
+  const altSpace = { code: 'Space', key: ' ', altKey: true };
+  const keyUp = (init: KeyboardEventInit) => act(async () => void document.body.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, ...init })));
+  const voice = (payload: Record<string, unknown>) => act(() => fake.event('voice.event', payload));
+  const captureId = () => (invoked('voice.start')[0] as { captureId: string }).captureId;
+  const dictationStatus = (index: 0 | 1) => within(composerOf(index)).queryByRole('status', { name: 'Dictation' });
+  const trustCard = () => <DockedCardFrame appSessionId={A} title="Trust this folder?" onAccept={() => {}} onDecline={null}>Trust?</DockedCardFrame>;
+
+  beforeEach(() => {
+    resetDictationStore();
+    // `composer.dictate` ships unbound (the owner's ruling, 2026-10-06); the hold cases bind ⌥Space as Settings › Keyboard would
+    disconnect();
+    disconnect = connectKeys(window, () => ({ 'composer.dictate': 'Alt+Space' }));
+  });
+  afterEach(() => resetDictationStore());
+
+  it('holding ⌥Space in pane 1 writes greyed partials there only, and the release settles the final', async () => {
+    live(A);
+    live(B);
+    focusTabs(1, [A, B]);
+    mount([{ index: 0, id: A }, { index: 1, id: B }], <DictationKeys />);
+    act(() => editorOf(1).focus());
+    await key(editorOf(1), altSpace);
+    await key(editorOf(1), { ...altSpace, repeat: true });
+    expect(invoked('voice.start')).toEqual([{ captureId: expect.any(String), locale: null }]);
+    expect(dictationStatus(1)?.textContent).toBe('Asking for permission…');
+
+    voice({ kind: 'started', captureId: captureId(), locale: 'en-US' });
+    expect(dictationStatus(1)?.textContent).toBe('Listening…');
+    expect(dictationStatus(0)).toBeNull();
+    voice({ kind: 'partial', captureId: captureId(), text: 'hello' });
+    voice({ kind: 'partial', captureId: captureId(), text: 'hello world' });
+    expect(editorOf(1).editor.getText()).toBe('hello world');
+    expect([...editorOf(1).querySelectorAll('.text-fg-muted')].map((el) => el.textContent)).toEqual(['hello world']);
+    expect(editorOf(0).editor.getText()).toBe('');
+
+    await keyUp(altSpace);
+    expect(invoked('voice.stop')).toEqual([{ captureId: captureId() }]);
+    expect(dictationStatus(1)?.textContent).toBe('Finishing…');
+    voice({ kind: 'final', captureId: captureId(), text: 'Hello world.', timedOut: false });
+    expect(editorOf(1).editor.getText()).toBe('Hello world.');
+    expect(editorOf(1).querySelectorAll('.text-fg-muted')).toHaveLength(0);
+    expect(dictationStatus(1)).toBeNull();
+  });
+
+  // scale-review C scalpel-5#1: a side thread's composer in the panel's Side pane is no pane's active tab; the hold
+  // follows the composer that holds focus, else the focused pane's
+  it('holding ⌥Space in a composer outside the focused pane (a side thread’s) writes there, not into the focused pane’s', async () => {
+    live(A);
+    live(B);
+    focusTabs(0, [A]); // the layout's focused pane shows A; B's composer stands for the thread's in the Side pane
+    mount([{ index: 0, id: A }, { index: 1, id: B }], <DictationKeys />);
+    act(() => editorOf(1).focus());
+    await key(editorOf(1), altSpace);
+    voice({ kind: 'started', captureId: captureId(), locale: 'en-US' });
+    voice({ kind: 'partial', captureId: captureId(), text: 'hello' });
+    expect(dictationStatus(1)?.textContent).toBe('Listening…');
+    expect(editorOf(1).editor.getText()).toBe('hello');
+    expect(editorOf(0).editor.getText()).toBe('');
+    await keyUp(altSpace);
+    voice({ kind: 'final', captureId: captureId(), text: 'Hello.', timedOut: false });
+    expect(editorOf(1).editor.getText()).toBe('Hello.');
+  });
+
+  it('a card over the box refuses: the notice shows in the dock and nothing starts', async () => {
+    live(A);
+    focusTabs(0, [A]);
+    dockCard(A, { id: 'c10:trust', render: trustCard });
+    mount([{ index: 0, id: A }], <DictationKeys />);
+    await within(composerOf(0)).findByRole('group', { name: 'Trust this folder?' });
+    await key(document.body, altSpace);
+    expect(invoked('voice.start')).toEqual([]);
+    expect(within(composerOf(0)).getByRole('note', { name: 'Dictation notice' }).textContent).toContain('Dictation needs a composer that can take text');
+  });
+
+  it('a card docking mid-capture keeps the words heard so far and cancels on main', async () => {
+    live(A);
+    focusTabs(0, [A]);
+    mount([{ index: 0, id: A }], <DictationKeys />);
+    act(() => editorOf(0).focus());
+    await key(editorOf(0), altSpace);
+    voice({ kind: 'started', captureId: captureId(), locale: 'en-US' });
+    voice({ kind: 'partial', captureId: captureId(), text: 'hello' });
+    act(() => void dockCard(A, { id: 'c10:trust', render: trustCard }));
+    await waitFor(() => expect(invoked('voice.cancel')).toEqual([{ captureId: captureId() }]));
+    expect(editorOf(0).editor.getText()).toBe('hello');
+    expect(useDictationStore.getState().capture).toBeNull();
+  });
+
+  // Loss of input ends a capture whatever started it (Design §8): a click-started capture has no key whose release the
+  // dispatcher could report, so the window's blur and a hidden document cancel it under a native permission dialog or
+  // after a switch to another app.
+  const blurWindow = () => act(() => void window.dispatchEvent(new Event('blur')));
+  const hideDocument = () =>
+    act(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+      try {
+        document.dispatchEvent(new Event('visibilitychange'));
+      } finally {
+        delete (document as { visibilityState?: unknown }).visibilityState;
+      }
+    });
+  const micOf = (index: 0 | 1) => within(composerOf(index)).getByRole('button', { name: 'Dictate' });
+  const clickMic = (index: 0 | 1 = 0) => fireEvent.click(micOf(index));
+
+  it('a click on a pane’s microphone dictates into that pane, not the focused one, and a second click settles the final', async () => {
+    live(A);
+    live(B);
+    focusTabs(1, [A, B]);
+    mount([{ index: 0, id: A }, { index: 1, id: B }], <DictationKeys />);
+    act(() => editorOf(1).focus());
+    clickMic(0);
+    expect(invoked('voice.start')).toEqual([{ captureId: expect.any(String), locale: null }]);
+    expect(dictationStatus(0)?.textContent).toBe('Asking for permission…');
+    expect(micOf(0).getAttribute('aria-pressed')).toBe('true');
+    expect(micOf(1).getAttribute('aria-pressed')).toBe('false');
+
+    voice({ kind: 'started', captureId: captureId(), locale: 'en-US' });
+    voice({ kind: 'partial', captureId: captureId(), text: 'hello' });
+    expect(editorOf(0).editor.getText()).toBe('hello');
+    expect(editorOf(1).editor.getText()).toBe('');
+
+    clickMic(0);
+    expect(invoked('voice.stop')).toEqual([{ captureId: captureId() }]);
+    expect(dictationStatus(0)?.textContent).toBe('Finishing…');
+    clickMic(0); // finishing: ignored
+    expect(invoked('voice.start')).toHaveLength(1);
+    expect(invoked('voice.stop')).toHaveLength(1);
+    voice({ kind: 'final', captureId: captureId(), text: 'Hello world.', timedOut: false });
+    expect(editorOf(0).editor.getText()).toBe('Hello world.');
+    expect(dictationStatus(0)).toBeNull();
+    expect(micOf(0).getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('a click-started capture still asking for permission ends when the window loses focus; its late start is dropped and the next click starts afresh', async () => {
+    live(A);
+    focusTabs(0, [A]);
+    mount([{ index: 0, id: A }], <DictationKeys />);
+    act(() => editorOf(0).focus());
+    clickMic();
+    expect(invoked('voice.start')).toHaveLength(1);
+    const first = captureId();
+    blurWindow();
+    expect(invoked('voice.cancel')).toEqual([{ captureId: first }]);
+    expect(dictationStatus(0)).toBeNull();
+    voice({ kind: 'started', captureId: first, locale: 'en-US' });
+    voice({ kind: 'partial', captureId: first, text: 'hello' });
+    expect(dictationStatus(0)).toBeNull();
+    expect(editorOf(0).editor.getText()).toBe('');
+    expect(invoked('voice.stop')).toEqual([]);
+    expect(invoked('voice.cancel')).toHaveLength(1);
+    clickMic(); // idle again: a click starts a new capture rather than stopping the cancelled one
+    expect(invoked('voice.start')).toEqual([{ captureId: first, locale: null }, { captureId: expect.not.stringMatching(first), locale: null }]);
+  });
+
+  for (const [name, lose] of [['the window loses focus', blurWindow], ['the document is hidden', hideDocument]] as const) {
+    it(`a listening click-started capture ends when ${name}: cancelled on main and its words removed`, async () => {
+      live(A);
+      focusTabs(0, [A]);
+      mount([{ index: 0, id: A }], <DictationKeys />);
+      act(() => editorOf(0).focus());
+      clickMic();
+      voice({ kind: 'started', captureId: captureId(), locale: 'en-US' });
+      voice({ kind: 'partial', captureId: captureId(), text: 'hello' });
+      expect(editorOf(0).editor.getText()).toBe('hello');
+      lose();
+      expect(invoked('voice.cancel')).toEqual([{ captureId: captureId() }]);
+      expect(editorOf(0).editor.getText()).toBe('');
+      expect(dictationStatus(0)).toBeNull();
+    });
+  }
+
+  it('a key hold losing focus is cancelled once, though the key’s own route and the input-loss route both fire', async () => {
+    live(A);
+    focusTabs(0, [A]);
+    mount([{ index: 0, id: A }], <DictationKeys />);
+    act(() => editorOf(0).focus());
+    await key(editorOf(0), altSpace);
+    voice({ kind: 'started', captureId: captureId(), locale: 'en-US' });
+    voice({ kind: 'partial', captureId: captureId(), text: 'hello' });
+    blurWindow();
+    expect(invoked('voice.cancel')).toEqual([{ captureId: captureId() }]);
+    expect(editorOf(0).editor.getText()).toBe('');
+    await keyUp(altSpace); // the key's latch is gone: its later release does nothing
+    expect(invoked('voice.stop')).toEqual([]);
+  });
+});
+// E9 end
+
+// P3-G (§D4.3, the M4 review's rulings): Mark-up's composite reaches the session's draft additively. With no composer
+// mounted it waits in the composer store's queue, which the next composer of the session drains into its restored draft;
+// a composer that is busy (a send in flight) refuses it, and the mark-up session stays open with its drawing.
+describe('P3-G: a mark-up attached to the session’s draft', () => {
+  const PNG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const LABEL = 'Mark-up of "Page A" — http://127.0.0.1/a.html ';
+  const shot = { id: 'a1', kind: 'image', name: 'shot.png', mediaType: 'image/png', bytes: 3, data: 'YWJj', persisted: true };
+  const markupPng = () => new File([PNG], 'mark-up.png', { type: 'image/png' });
+  const stripNames = () => within(within(composerOf(0)).getByRole('list', { name: 'attachments' })).getAllByRole('listitem').map((item) => within(item).getByRole('button').getAttribute('aria-label')!.replace('Remove ', ''));
+  let stored: Draft | null;
+  let sendAnswer: ((value: unknown) => void) | null;
+
+  beforeEach(() => {
+    // happy-dom decodes no images: the controller's downscale gets a 4 × 4 bitmap and re-encodes it as the same bytes
+    vi.stubGlobal('createImageBitmap', async () => ({ width: 4, height: 4, close: () => {} }));
+    vi.stubGlobal(
+      'OffscreenCanvas',
+      class {
+        getContext() {
+          return { drawImage: () => {} };
+        }
+        async convertToBlob(options?: { type?: string }) {
+          return new Blob([PNG], { type: options?.type ?? 'image/png' });
+        }
+      },
+    );
+    stored = { doc: { ...docOf([paragraph(textNode('keep this thought'))]), attrs: { attachments: [shot] } }, attachments: [], updatedAt: '2026-10-13T00:00:00.000Z' };
+    sendAnswer = null;
+    const base = fake.client;
+    window.maws = {
+      ...base,
+      pathForFile: () => '',
+      invoke: (async (name: string, input: { draft?: Draft | null }) => {
+        if (name === 'session.drafts.get') return { ok: true, value: stored };
+        if (name === 'session.drafts.set') {
+          stored = input.draft ?? null;
+          return { ok: true, value: undefined };
+        }
+        if (name === 'session.send' && sendAnswer === null) return new Promise((resolve) => (sendAnswer = resolve as (value: unknown) => void));
+        return base.invoke(name as never, input as never);
+      }) as MawsBridge['invoke'],
+    } as MawsBridge;
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    resetMarkup();
+    resetMarkupSurfaces();
+  });
+
+  it('a draft of text and an image kept across an unmount takes the queued mark-up beside it when the composer mounts again', async () => {
+    live(A);
+    const first = mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(editorOf().editor.getText()).toBe('keep this thought'));
+    expect(stripNames()).toEqual(['shot.png']);
+    first.unmount();
+
+    queueComposerAttachment(A, { files: [markupPng()], text: LABEL });
+    mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(stripNames()).toEqual(['shot.png', 'mark-up.png']));
+    expect(editorOf().editor.getText()).toBe(`keep this thought ${LABEL}`); // a space between, the draft's text kept
+    expect(useComposerStore.getState().attachmentQueue.has(A)).toBe(false);
+  });
+
+  it('a composer with a send in flight refuses Add to chat: the session stays with its drawing and the toast says so; once the send settles it takes it', async () => {
+    live(A);
+    useLayout.setState({ main: mainShowing(A), panelBySession: new Map([[A, { tabs: [{ id: 'browser:1', toolId: 'browser', pinned: false }], activeTabId: 'browser:1' }]]) });
+    mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(editorOf().editor.getText()).toBe('keep this thought'));
+    await key(editorOf(), { key: 'Enter' }); // the send stays in flight: the editor is busy
+    await waitFor(() => expect(sendAnswer).not.toBeNull());
+
+    const element = document.body.appendChild(document.createElement('div'));
+    vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 400, height: 300, x: 0, y: 0, right: 400, bottom: 300, toJSON: () => ({}) } as DOMRect);
+    const end = vi.fn();
+    registerMarkupSurface(
+      { surface: 'panel', tabId: 'browser:1' },
+      { element: () => element, label: () => '"Page A" — http://127.0.0.1/a.html', begin: async () => ({ mediaType: 'image/png', data: 'iVBORw==', width: 400, height: 300 }), end },
+    );
+    await act(() => startMarkup());
+    const session = useMarkup.getState().session;
+    expect(session).not.toBeNull();
+    const picture = async () => new Blob([PNG], { type: 'image/png' });
+
+    await act(() => addMarkupToChat([], picture));
+    expect(useMarkup.getState().session).toBe(session);
+    expect(end).not.toHaveBeenCalled();
+    expect(useNotices.getState().notices.filter((n) => n.kind === 'toast').map((n) => n.text)).toEqual([MARKUP_COPY.composerBusy]);
+    expect(MARKUP_COPY.composerBusy).toBe('The composer is busy — try again in a moment');
+    expect(stripNames()).toEqual(['shot.png']);
+    expect(useComposerStore.getState().attachmentQueue.has(A)).toBe(false);
+
+    await act(async () => sendAnswer!({ ok: true, value: { messageUuid: null, disposition: 'sent', queueId: 'q-1' } }));
+    await waitFor(() => expect(editorOf().editor.getText()).toBe(''));
+    await act(() => addMarkupToChat([], picture));
+    expect(useMarkup.getState().session).toBeNull();
+    expect(end).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(stripNames()).toEqual(['mark-up.png']));
+    expect(editorOf().editor.getText()).toBe(LABEL);
+  });
+
+  // The re-review's case: submit, close the card, Add to chat (queued), reopen the card before the send settles. The
+  // reopened composer joins the flight and refuses the queued picture; once the flight settles it takes it, with nothing
+  // unmounted or queued since.
+  it('a queued mark-up a composer refused while its send was in flight is taken once the send settles', async () => {
+    live(A);
+    const first = mount([{ index: 0, id: A }]);
+    await waitFor(() => expect(editorOf().editor.getText()).toBe('keep this thought'));
+    await key(editorOf(), { key: 'Enter' });
+    await waitFor(() => expect(sendAnswer).not.toBeNull());
+    first.unmount();
+
+    queueComposerAttachment(A, { files: [markupPng()], text: LABEL });
+    mount([{ index: 0, id: A }]); // joins the flight: busy
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20))); // its registration's drain was refused
+    expect(editorOf().getAttribute('contenteditable')).toBe('false'); // busy
+    expect(stripNames()).toEqual(['shot.png']);
+    expect(useComposerStore.getState().attachmentQueue.get(A)).toHaveLength(1);
+
+    await act(async () => sendAnswer!({ ok: true, value: { messageUuid: null, disposition: 'sent', queueId: 'q-1' } }));
+    await waitFor(() => expect(stripNames()).toEqual(['mark-up.png']));
+    expect(editorOf().editor.getText()).toBe(LABEL);
+    expect(useComposerStore.getState().attachmentQueue.has(A)).toBe(false);
+  });
+
+  // §D4.2: Escape discards everything, including a picture the composer is still converting when it is pressed.
+  it('Escape while the composer is still converting the picture attaches nothing: no image, no label, nothing queued', async () => {
+    let decode: (() => void) | null = null;
+    vi.stubGlobal('createImageBitmap', () => new Promise((resolve) => (decode = () => resolve({ width: 4, height: 4, close: () => {} }))));
+    live(A);
+    useLayout.setState({ main: mainShowing(A), panelBySession: new Map([[A, { tabs: [{ id: 'browser:1', toolId: 'browser', pinned: false }], activeTabId: 'browser:1' }]]) });
+    mount([{ index: 0, id: A }], <MarkupLayer />);
+    await waitFor(() => expect(editorOf().editor.getText()).toBe('keep this thought'));
+
+    const element = document.body.appendChild(document.createElement('div'));
+    vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 400, height: 300, x: 0, y: 0, right: 400, bottom: 300, toJSON: () => ({}) } as DOMRect);
+    const end = vi.fn();
+    registerMarkupSurface(
+      { surface: 'panel', tabId: 'browser:1' },
+      { element: () => element, label: () => '"Page A" — http://127.0.0.1/a.html', begin: async () => ({ mediaType: 'image/png', data: 'iVBORw==', width: 400, height: 300 }), end },
+    );
+    await act(() => startMarkup());
+    expect(screen.getByRole('region', { name: 'Mark-up' })).toBeTruthy();
+
+    const adding = addMarkupToChat([], async () => new Blob([PNG], { type: 'image/png' }));
+    await waitFor(() => expect(decode).not.toBeNull()); // the composer is converting the picture
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    expect(useMarkup.getState().session).toBeNull();
+    expect(end).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      decode!();
+      await adding;
+    });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(stripNames()).toEqual(['shot.png']);
+    expect(editorOf().editor.getText()).toBe('keep this thought');
+    expect(useComposerStore.getState().attachmentQueue.has(A)).toBe(false);
+    expect(useNotices.getState().notices.filter((n) => n.kind === 'toast')).toEqual([]);
+  });
+});

@@ -1,0 +1,183 @@
+// User-message text handling: the one place the reducer turns a `user.message`'s content into the user row's text
+// and attachments, before anything markdown-shaped sees the text (C6 execution document, *Pasted content* under
+// Derivation, C7's contract verbatim: extraction before the markdown stage, which shows raw tags as written since W1).
+// The engine's record of a slash command folds to the one line the human typed here too. E3: an anchored comment
+// (X10's framing, `@shared/anchor/message`) is recognised here, so the live prompt, the engine's queued steer on disk and
+// a held entry draw its anchor chip from the text alone, and the row's text is the comment as typed.
+import { slashCommandLine } from '@shared/wire/local-command';
+export { slashCommandLine } from '@shared/wire/local-command';
+import { PASTED_BLOCK, PASTED_PLACEHOLDER, pastedPlaceholder } from '@shared/composer/pasted-content';
+import type { Anchor } from '@shared/anchor/anchor';
+import { anchoredMessage, anchorLead, anchorTag, parseAnchoredText } from '@shared/anchor/message';
+import type { ContentBlock } from '@shared/graph/events';
+import { linkedReadOf } from '@shared/maws/linked-read'; // P4-A3
+import type { AnchorFrame, Attachment } from './rows';
+
+const utf8Length = (text: string) => new TextEncoder().encode(text).length;
+
+export interface UserText {
+  text: string;
+  attachments: Attachment[];
+  placeholders: number[]; // where each pasted block's placeholder was put in `text`, the n-th block's at [n - 1]
+  lines: number;
+  anchor: Anchor | null; // E3: what an anchored comment is about; null for every other message
+  frame: AnchorFrame | null; // E11: the framing taken off with it, null exactly when `anchor` is
+}
+
+// The n-th match becomes a `text` attachment; its place in the text is `[Pasted text #n +L lines]`, keeping one
+// newline on each side when the match consumed any. Where each placeholder went is recorded, so text the human typed
+// in the same shape is never taken for one (copy, export and the bubble split only at the recorded places).
+export function splitPastedSegments(text: string): { text: string; attachments: Attachment[]; placeholders: number[] } {
+  const attachments: Attachment[] = [];
+  const placeholders: number[] = [];
+  let out = '';
+  let from = 0;
+  for (const match of text.matchAll(PASTED_BLOCK)) {
+    const [whole, , body] = match;
+    out += text.slice(from, match.index);
+    if (whole.startsWith('\n')) out += '\n';
+    attachments.push({ kind: 'text', name: `Pasted text #${attachments.length + 1}`, bytes: utf8Length(body), dataUrl: null, mediaType: 'text/plain', text: body });
+    placeholders.push(out.length);
+    out += pastedPlaceholder(attachments.length, body.split('\n').length);
+    if (whole.endsWith('\n')) out += '\n';
+    from = match.index + whole.length;
+  }
+  return { text: out + text.slice(from), attachments, placeholders };
+}
+
+// The recorded placeholders of a user row, in text order: each one's range and its pasted attachment.
+export function placeholdersOf(text: string, attachments: Attachment[], placeholders: number[]): { from: number; to: number; n: number; lines: number; attachment: Attachment }[] {
+  const pasted = attachments.filter((attachment) => attachment.kind === 'text');
+  return placeholders.flatMap((at, i) => {
+    const match = new RegExp(PASTED_PLACEHOLDER.source, 'y');
+    match.lastIndex = at;
+    const found = match.exec(text);
+    const attachment = pasted[i];
+    return found && attachment && Number(found[1]) === i + 1 ? [{ from: at, to: at + found[0].length, n: i + 1, lines: Number(/\+(\d+) lines/.exec(found[0])![1]), attachment }] : [];
+  });
+}
+
+// A user row as Copy and the markdown export give it (scale-review C scalpel-2#2): its text untagged, after the anchor
+// in words when it is an anchored comment (the lead X10 writes; for an anchorless `/btw` promotion its label), so what
+// the chip names is not lost.
+export function copiedUserText(row: { text: string; attachments: Attachment[]; placeholders: number[]; anchor?: Anchor }): string {
+  const text = untaggedUserText(row.text, row.attachments, row.placeholders);
+  if (row.anchor === undefined) return text;
+  return `${row.anchor.kind === 'none' ? `${row.anchor.label}:` : anchorLead(row.anchor, false)}\n${text}`;
+}
+
+// Copy and export: each recorded placeholder replaced by its body, untagged (the engine's own behaviour); text typed
+// in the placeholder's shape stays as typed.
+export function untaggedUserText(text: string, attachments: Attachment[], placeholders: number[]): string {
+  let out = '';
+  let from = 0;
+  for (const placeholder of placeholdersOf(text, attachments, placeholders)) {
+    out += text.slice(from, placeholder.from) + (placeholder.attachment.text ?? '');
+    from = placeholder.to;
+  }
+  return out + text.slice(from);
+}
+
+const base64Bytes = (data: string) => Math.floor((data.length * 3) / 4) - (data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0);
+
+// Content blocks that are not text become attachments: base64 images render inline from a data URL (nothing is
+// loaded by path, §4.1), documents and unknown media become file chips.
+function attachmentOf(block: ContentBlock, index: number): Attachment | null {
+  const source = block.source as { type?: string; media_type?: string; data?: string } | undefined;
+  if (block.type === 'image') {
+    const data = source?.type === 'base64' && typeof source.data === 'string' ? source.data : null;
+    const mediaType = source?.media_type ?? 'image/*';
+    return { kind: 'image', name: `Image ${index + 1}`, bytes: data === null ? null : base64Bytes(data), dataUrl: data === null ? null : `data:${mediaType};base64,${data}`, mediaType, text: null };
+  }
+  if (block.type === 'document') {
+    const data = typeof source?.data === 'string' ? source.data : null;
+    return { kind: 'file', name: typeof block.title === 'string' ? block.title : `Document ${index + 1}`, bytes: data === null ? null : base64Bytes(data), dataUrl: null, mediaType: source?.media_type ?? null, text: null };
+  }
+  return null;
+}
+
+export function userTextOf(content: string | ContentBlock[]): UserText {
+  const texts: string[] = [];
+  const attachments: Attachment[] = [];
+  if (typeof content === 'string') texts.push(content);
+  else {
+    content.forEach((block, index) => {
+      // P4-A3: the read of an artifact the message linked, sent with it, is shown as what went, never as the human's words
+      const linked = block.type === 'text' && typeof block.text === 'string' ? linkedReadOf(block.text) : null;
+      if (linked) attachments.push({ kind: 'file', name: `${linked.title}, read at revision ${linked.revision}`, bytes: null, dataUrl: null, mediaType: `sent with the message: the ${linked.kind} as artifact_read returned it`, text: null });
+      else if (block.type === 'text' && typeof block.text === 'string') texts.push(block.text);
+      else {
+        const attachment = attachmentOf(block, index);
+        if (attachment) attachments.push(attachment);
+      }
+    });
+  }
+  const joined = texts.join('\n\n');
+  const anchored = joined.includes('<maws_anchor') ? parseAnchoredText(joined) : null; // E3: the framing is MAWS's, not the human's words
+  const body = anchored?.text ?? joined;
+  const split = splitPastedSegments(slashCommandLine(body) ?? body);
+  const text = split.text;
+  const frame = anchored ? { destination: anchored.destination, screenshot: joined.split('\n', 1)[0] === anchorLead(anchored.anchor, true) } : null;
+  return { text, attachments: [...split.attachments, ...attachments], placeholders: split.placeholders, lines: text.length === 0 ? 0 : text.split('\n').length, anchor: anchored?.anchor ?? null, frame };
+}
+
+// E11 (scale-review C scalpel-2#1): `userTextOf`'s parse inverted, a comment put back in the framing it was sent in, so
+// an anchored bubble edited and resent keeps its anchor for the agent and its chip in the transcript. A `/btw`
+// promotion (no destination) had no lead or preamble to restore: its text is followed by the tag alone.
+export function anchoredTextOf(framed: { anchor: Anchor } & AnchorFrame, text: string): string {
+  const { anchor, destination, screenshot } = framed;
+  return destination === null ? `${text.trim()}\n\n${anchorTag(anchor)}` : anchoredMessage({ anchor, text, destination, screenshot });
+}
+
+// The engine's local-command echo (`/model`, `/status` and the like arrive as replayed user frames wrapped in these
+// tags; C3 tags the event `origin: 'local-command'`): a `local_command` row, never a bubble and never a turn. The
+// wrapper is recognised too, so an untagged replay (disk backfill) reads the same way.
+const LOCAL_COMMAND = /<local-command-(stdout|stderr|caveat)>([\s\S]*?)<\/local-command-\1>/g;
+
+export function localCommandOutput(content: string | ContentBlock[]): string | null {
+  if (typeof content !== 'string') return null;
+  const matches = [...content.matchAll(LOCAL_COMMAND)];
+  if (matches.length === 0 || content.replace(LOCAL_COMMAND, '').trim() !== '') return null;
+  return matches.filter((match) => match[1] !== 'caveat').map((match) => match[2].trim()).filter(Boolean).join('\n');
+}
+
+export const isLocalCommand = (origin: string | null, content: string | ContentBlock[]) => origin === 'local-command' || localCommandOutput(content) !== null;
+
+// E11's sitting (owner-notes 00-consolidated-plan §2.3; narrows W1): a local-command echo that only confirms a setting
+// change draws nothing, since its chip already shows the change. Matched on whole lines in the engine's own words
+// (2.1.293's `/model`, `/fast`, `/effort`, `/output-style`, `/plan`, `/theme` and `/color` messages, as the binary
+// writes them, and the `Set model to` echoes recorded on 2.1.283), so a confirmation carrying anything more (a save that
+// failed, an override still in force, a note about new sessions) keeps its card; informative outputs (`/cost`,
+// `/status`, `/context`, `/help`) never match. The text is the echo with its tags and colours stripped; each of its
+// lines is tested on its own, and the echo is hidden only when every line is a confirmation (F2a review 2: a warning
+// joined to one keeps the card).
+const SCOPE = String.raw`(?: for this session only| and saved as your default for new sessions)?`;
+const FAST = String.raw`(?: · (?:Fast mode ON|Fast mode OFF|Draws from usage credits))*`;
+const SETTING_CONFIRMATIONS: readonly RegExp[] = [
+  new RegExp(String.raw`^(?:Set model to|Kept model as) \`[^\`]+\`${SCOPE}(?: with \S+ effort)?${FAST}$`),
+  /^Fast mode (?:ON|OFF)(?: · Draws from usage credits)?$/,
+  /^(?:\S+ )?Kept Fast mode (?:ON|OFF)$/u, // led by the fast-mode glyph
+  /^Set effort level to \S+(?: \((?:this session only|saved as your default for new sessions)\))?: [^·(]+(?: \(on supported models\))?(?: · Ultracode off)?$/, // the level's description: xhigh's ends "(on supported models)"
+  /^Effort level set to auto(?: \((?:this session only|saved as your default for new sessions)\))?(?: · Ultracode off)?$/,
+  /^Output style set to [^\n]+$/,
+  /^Enabled plan mode$/,
+  /^Theme set to \S+$/,
+  /^Session color (?:set to: \S+|reset to default)$/,
+];
+
+export function confirmsSettingChange(text: string): boolean {
+  const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
+  return lines.length > 0 && lines.every((line) => SETTING_CONFIRMATIONS.some((pattern) => pattern.test(line)));
+}
+
+// The engine's own marker for an interrupted request (C3 tags it `origin: 'interrupt-marker'`): no row and no turn; the
+// divider's stopped state already says it.
+export const INTERRUPT_MARKER = '[Request interrupted by user]';
+export const INTERRUPT_MARKERS: readonly string[] = [INTERRUPT_MARKER, '[Request interrupted by user for tool use]']; // the engine's two (M6: the second, untagged, in `pass2/per-task-stop-off` seq 71)
+
+export function isInterruptionMarker(origin: string | null, content: string | ContentBlock[]): boolean {
+  if (origin === 'human') return false; // a typed prompt or human steer is not engine evidence, whatever its words
+  if (origin === 'interrupt-marker') return true;
+  const text = typeof content === 'string' ? content : content.length === 1 && content[0].type === 'text' ? String(content[0].text ?? '') : '';
+  return INTERRUPT_MARKERS.includes(text.trim()); // a complete marker only: a prompt that begins with one and continues is a bubble
+}

@@ -1,0 +1,89 @@
+// Every sentence of the Session info tool (C11 execution document, Interfaces "Session info tool"; mockup 06 vignette 03).
+
+import type { PermissionMode } from '@shared/graph/enums';
+import { PERMISSION_MODE_LABELS } from '@shared/sessions/permission-mode-labels';
+
+export const LANE = {
+  off: (mode: PermissionMode) => `Auto mode is off · ${PERMISSION_MODE_LABELS[mode]}`,
+  observed: (account: string) => `Local · Sonnet 5 through ${account} · counted as usage · the engine's notice is in the transcript`,
+  someAccount: 'the routing account',
+  expectedGateway: 'Local (expected) · a GPT route carries no Anthropic verdict',
+  expectedFast: 'Local (expected) · fast mode is on',
+  expectedDisabled: 'Local (expected) · the server lane is disabled for this session',
+  server: 'Server · reviews ride on the main request · no charge · model chosen server-side',
+  unknown: 'Not read yet',
+  reviews: (evaluated: number, flagged: number) => `${evaluated} tool call${evaluated === 1 ? '' : 's'} evaluated, ${flagged} flagged`,
+};
+
+export const INFO = {
+  title: 'Session info',
+  noSession: 'Open a session to see its details',
+  sections: { engine: 'Engine', model: 'Model', gateway: 'Gateway', permissions: 'Permissions', usage: 'Context, usage, cost', hooks: 'Hooks and MCP' },
+  // Engine
+  version: 'Version',
+  binary: 'Binary',
+  sessionId: 'Session id',
+  plugins: 'Plugins', // P2-A: the loaded plugins the engine last reported, while no process is live
+  pluginsLoaded: (n: number) => `${n} loaded`,
+  // W7: who holds the session (the glyph's derivation, attention/derive.ts)
+  heldBy: 'Held by',
+  heldByMaws: 'MAWS',
+  heldByNone: 'No process',
+  contested: (other: string) => `MAWS and ${other}`,
+  contestedNote: 'Contested: MAWS yields once the other process writes',
+  readOnly: 'Read-only here',
+  processTree: 'Process tree',
+  tree: (tree: string, own: string | null) => (own === null ? tree : `${tree} · own ${own}`),
+  // Model
+  main: 'Main',
+  subagents: 'Subagents',
+  subagentChosen: 'CLAUDE_CODE_SUBAGENT_MODEL, chosen at launch',
+  subagentsInherit: "each agent's own, else Main", // W3: no CLAUDE_CODE_SUBAGENT_MODEL (the engine's precedence, SPEC 18)
+  effort: 'Effort', // P2-A: the engine's last reported effort, while no process is live
+  outputStyle: 'Output style', // P2-A: the engine's last reported output style, while no process is live
+  overrides: 'Overrides',
+  passedThrough: 'passed through from your shell',
+  // Gateway
+  route: 'Route',
+  routed: (baseUrl: string) => `Gateway · ClaudeUsage relay · ${baseUrl}`,
+  direct: "Direct · engine's own login",
+  directLogin: (login: string) => `Direct · engine's own login · ${login}`,
+  unverified: 'Route unverified',
+  mismatch: (mode: string) => `the engine's base URL does not match the ${mode === 'direct' ? 'direct' : 'gateway'} route it was launched on`,
+  pending: 'not verified yet',
+  account: 'Account',
+  toolSearch: 'Tool search',
+  toolSearchOn: 'on · ENABLE_TOOL_SEARCH, needed behind a base URL',
+  toolSearchOff: 'off',
+  login: 'Login',
+  organization: 'Organization',
+  email: 'Email',
+  pinnedHere: 'pinned for this session',
+  routingNow: 'routing now',
+  noAccount: 'no account yet',
+  // Permissions
+  mode: 'Mode',
+  effectiveNote: 'effective, from the init frame',
+  lane: 'Auto-mode lane',
+  rules: 'Rules',
+  ruleCounts: (allow: number, ask: number, deny: number, grants: number) => `${allow} allow · ${ask} ask · ${deny} deny · ${grants} session grant${grants === 1 ? '' : 's'}`,
+  grantsOnly: (grants: number) => `${grants} session grant${grants === 1 ? '' : 's'} · the rules are not read yet`,
+  openPermissions: '/permissions',
+  // Context, usage, cost
+  context: 'Context',
+  contextLine: (used: string, max: string, percent: number, threshold: string | null) => `${used} of ${max} · ${percent}%${threshold === null ? '' : ` · autocompact at ${threshold}`}`,
+  usage: 'Usage',
+  fromClaudeUsage: 'from ClaudeUsage, shared by every session',
+  fromEngine: 'from the engine',
+  pace: 'Pace', // W2: the usage popover's pace line, here since the status line is gone
+  cost: 'Cost',
+  costLine: (total: string, since: string) => `${total} this session · ${since} since you last looked`,
+  // Hooks and MCP
+  hooks: 'Hooks',
+  hookCounts: (settings: number, plugin: number) => `${settings} settings hook${settings === 1 ? '' : 's'} · ${plugin} plugin hook${plugin === 1 ? '' : 's'}`,
+  mcp: 'MCP',
+  mcpConnected: (n: number) => `${n} connected`,
+  failed: (name: string, error: string | null) => (error ? `${name} failed · ${error}` : `${name} failed`),
+  unread: 'not read',
+  none: '—',
+};

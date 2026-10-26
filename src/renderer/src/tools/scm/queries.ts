@@ -1,0 +1,73 @@
+// The two reads the Source control tool and the summary's push-state row share (E6 execution document, Design §6), with
+// one owner for their keys and the PR state's rules, so the two surfaces cost one poll and nothing writes a key by
+// hand. Light on purpose: the summary imports it, so it imports nothing of the tool's components or stores.
+//
+// `scm.status`: the checkout's trust, remotes and gh state. `scm.pr.state`: the branch's PR and its checks, polled every
+// 2 minutes only while a surface shows it and the window is shown, asked only for a branch of a trusted checkout with a
+// remote. Both are asked again when the repository's head or refs move (a push from anywhere, a new remote or upstream),
+// and `scm.status` when a session's setup records trust: one app-level listener (`connectPanelEvents`, ipc/events.ts)
+// does it through `invalidateScmQueries`, so neither surface subscribes to an event of its own (E11 W-D).
+import { useEffect, useRef } from 'react';
+import type { AppSessionId } from '@shared/graph/ids';
+import type { ScmStatus } from '@shared/ipc/schema/scm';
+import { queryClient, useCommand } from '../../ipc/query';
+
+// `useCommand`'s keys (`['maws', name, input]`), and each command's prefix for every session.
+export const SCM_STATUS_QUERIES = ['maws', 'scm.status'] as const;
+export const PR_STATE_QUERIES = ['maws', 'scm.pr.state'] as const;
+export const scmStatusKey = (appSessionId: AppSessionId) => [...SCM_STATUS_QUERIES, { appSessionId }];
+export const prStateKey = (appSessionId: AppSessionId) => [...PR_STATE_QUERIES, { appSessionId, refresh: false }];
+
+export const PR_STATE_POLL = { staleTime: 60_000, refetchInterval: 120_000, refetchIntervalInBackground: false } as const; // main keeps an answer 60 s
+
+// The scm queries of the sessions `which` picks, every one of `prefixes` (both reads by default). The keys' third part
+// names the session; a key without one names none and is passed over.
+export function invalidateScmQueries(which: (appSessionId: AppSessionId) => boolean, prefixes: readonly (readonly unknown[])[] = [SCM_STATUS_QUERIES, PR_STATE_QUERIES]): void {
+  const sessionOf = (queryKey: readonly unknown[]) => (queryKey[2] as { appSessionId?: AppSessionId } | undefined)?.appSessionId;
+  for (const queryKey of prefixes) {
+    void queryClient.invalidateQueries({
+      queryKey,
+      predicate: (query) => {
+        const appSessionId = sessionOf(query.queryKey);
+        return appSessionId !== undefined && which(appSessionId);
+      },
+    });
+  }
+}
+
+// The checkout's `scm.status`. Read again when its repository's head or refs move (`git remote add`, a remote's URL or an
+// upstream set by a push change the remotes and defaults it answers; the watcher reads `config` as refs) and when a
+// session's setup records trust.
+export function useScmStatus(appSessionId: AppSessionId) {
+  return useCommand('scm.status', { appSessionId });
+}
+
+// Something to ask gh about: a branch of a trusted checkout with a remote.
+function prStateEnabled(branch: string | null, scm: ScmStatus | undefined): boolean {
+  return branch !== null && scm !== undefined && scm.trusted && scm.remotes.length > 0;
+}
+
+// The PR state of the session's checkout on `branch`, read again when its repository's head or refs move. The query is
+// the session's, so the tool and the row share one poll, while main answers for the branch the
+// checkout was on when asked; a query that stops asking keeps its last answer. So an answer is shown only while there
+// is something to ask and only when it names the current branch: after a switch nothing is said until the new branch's
+// answer, and nothing on a detached head or once trust or the last remote is gone. An answer naming no branch (main
+// found the checkout untrusted, not a repository or detached) carries no PR and stands: the row reads trust from it.
+// E11: an answer naming another branch is asked again at once, once per pair of branches (a switch made while nothing
+// showed the query leaves a fresh answer for the old branch, which the poll would otherwise keep for up to 2 minutes).
+export function usePrState(appSessionId: AppSessionId, { branch, scm }: { branch: string | null; scm: ScmStatus | undefined }) {
+  const enabled = prStateEnabled(branch, scm);
+  const query = useCommand('scm.pr.state', { appSessionId, refresh: false }, { ...PR_STATE_POLL, enabled });
+  const answer = query.data;
+  const reasked = useRef<string | null>(null);
+  const named = answer?.branch ?? null;
+  useEffect(() => {
+    const mismatch = enabled && named !== null && named !== branch ? `${named}\0${branch}` : null;
+    if (mismatch !== null && reasked.current !== mismatch) void queryClient.invalidateQueries({ queryKey: prStateKey(appSessionId) });
+    reasked.current = mismatch;
+  }, [enabled, named, branch, appSessionId]);
+  return {
+    data: enabled && answer !== undefined && (answer.branch === null || answer.branch === branch) ? answer : undefined,
+    error: enabled ? query.error : null,
+  };
+}

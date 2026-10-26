@@ -1,0 +1,68 @@
+[
+  {
+    "at": "2026-10-02T03:32:39.723Z",
+    "id": "time:error:replay:journal:4:0",
+    "kind": "time",
+    "label": "Oct 2, 2026 3:32 AM",
+    "turnId": null
+  },
+  {
+    "at": "2026-10-02T03:32:39.723Z",
+    "attempt": null,
+    "id": "error:replay:journal:4:0",
+    "kind": "error",
+    "lostAttentionCount": null,
+    "scope": "plugin",
+    "severity": "notice",
+    "text": "mods-probe: MODS_PROBE_LOG start surface=null interactive=false",
+    "turnId": null
+  },
+  {
+    "at": "2026-10-02T03:32:39.731Z",
+    "attachments": [],
+    "dropped": false,
+    "editable": true,
+    "id": "user:25f97b6c-09a1-4ad4-9918-ffde8718a41a",
+    "kind": "user",
+    "lines": 1,
+    "messageUuid": "25f97b6c-09a1-4ad4-9918-ffde8718a41a",
+    "placeholders": [],
+    "steer": false,
+    "text": "Reply with exactly MODS_PROBE_OK",
+    "turnId": "turn:25f97b6c-09a1-4ad4-9918-ffde8718a41a"
+  },
+  {
+    "at": "2026-10-02T03:32:40.584Z",
+    "blockIndex": 1,
+    "id": "text:msg_011CfchudsPvEtSSfGaWE8cz:1",
+    "kind": "assistant_text",
+    "live": false,
+    "markdown": "MODS_PROBE_OK",
+    "messageUuid": "034a2760-71a8-456b-a387-c5d57326024b",
+    "model": "claude-haiku-4-5-20251001",
+    "phase": "answer",
+    "turnId": "turn:25f97b6c-09a1-4ad4-9918-ffde8718a41a"
+  },
+  {
+    "at": "2026-10-02T03:32:40.621Z",
+    "attempt": null,
+    "id": "error:replay:journal:30:0",
+    "kind": "error",
+    "lostAttentionCount": null,
+    "scope": "plugin",
+    "severity": "notice",
+    "text": "mods-probe: MODS_PROBE_LOG turn",
+    "turnId": null
+  },
+  {
+    "at": "2026-10-02T03:32:47.149Z",
+    "attempt": null,
+    "id": "error:replay:journal:42:0",
+    "kind": "error",
+    "lostAttentionCount": 0,
+    "scope": "exit",
+    "severity": "notice",
+    "text": "Session process exited (unknown)",
+    "turnId": null
+  }
+]

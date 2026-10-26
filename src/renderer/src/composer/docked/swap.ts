@@ -1,0 +1,59 @@
+// What takes the composer's place (C7 execution document, M4 decisions and "Placements"): the oldest card another child
+// docked (C10's trust and relay-down cards) first, then the session's oldest open answerable request (the five kinds,
+// each once its request is read, so the frame hides in the same commit the card's frame mounts and takes focus; a
+// dialog only when its payload reads as one of the two declared kinds, so an undeclared or invalid one never swaps the
+// editor out). The oldest open item that is actionable but not answerable here (an undeclared dialog, a request main
+// no longer holds, an error, an interruption, auto mode unavailable) shows as a notice above the frame instead. E1 M4b:
+// a blocking `maws` ask (a question item read as `maws.ask.opened`) is answered in the Question sheet, not here, so it
+// is a notice too and the editor stays. P2-C (2026-10-10): a question an agent left or a must-read is neither: its card
+// stands in the session's transcript. Pure.
+import type { AttentionItem } from '@shared/graph/attention';
+import type { SessionEvent } from '@shared/graph/events';
+import type { AttentionId } from '@shared/graph/ids';
+import { isActionable, isOpen } from '@shared/attention/kinds';
+import { declaredDialog } from '../../request-card/variants/dialog-kinds';
+
+export interface Swap {
+  item: AttentionItem | null; // the request that docks (when no foreign card does)
+  notice: AttentionItem | null; // shown above the frame, never in its place
+  waiting: number; // how many more answerable requests wait behind the docked one
+  unread: AttentionItem[]; // requests not read yet (the composer reads them; a dialog's decides whether it is declared)
+}
+
+const REQUEST_KINDS: ReadonlySet<AttentionItem['kind']> = new Set(['permission', 'question', 'plan', 'elicitation']); // and dialogs, by their kind
+const at = (item: AttentionItem) => Date.parse(item.createdAt);
+const byAge = (a: AttentionItem, b: AttentionItem) => at(a) - at(b);
+
+// E11 F2b (plan 2.4): an error seen here (confirmed) is out of Needs you but keeps its notice in its session until it is
+// dismissed or the next turn retires it; an open item's notice comes before it.
+const seenError = (item: AttentionItem) => item.kind === 'error' && item.state === 'confirmed';
+
+export function swapOf(items: readonly AttentionItem[], requests: ReadonlyMap<AttentionId, SessionEvent | null>): Swap {
+  const open = items.filter((item) => isOpen(item) || seenError(item)).sort((a, b) => Number(seenError(a)) - Number(seenError(b)) || byAge(a, b));
+  const unread: AttentionItem[] = [];
+  const answerable: AttentionItem[] = [];
+  const notices: AttentionItem[] = [];
+  for (const item of open) {
+    const asks = item.kind === 'dialog' || REQUEST_KINDS.has(item.kind);
+    const request = asks ? requests.get(item.id) : null;
+    if (request === undefined) {
+      // not read yet: it docks once it is, so the frame hides in the same commit the card's frame mounts (and takes focus)
+      unread.push(item);
+      continue;
+    }
+    if (asks && request === null) {
+      // main's broker no longer holds it, or its read failed twice (the store's `unreadable`): the card can only show its
+      // notice (with the failure), so it never takes the editor's place
+      notices.push(item);
+      continue;
+    }
+    if (item.kind === 'async_input' || item.kind === 'essential_unread') continue; // P2-C: the session's own card in its transcript carries it
+    if (request?.kind === 'maws.ask.opened') notices.push(item);
+    else if (item.kind === 'dialog') {
+      const declared = request?.kind === 'dialog.requested' && declaredDialog(request.dialogKind, request.payload).ok;
+      (declared ? answerable : notices).push(item);
+    } else if (REQUEST_KINDS.has(item.kind)) answerable.push(item);
+    else if (isActionable(item)) notices.push(item);
+  }
+  return { item: answerable[0] ?? null, notice: notices[0] ?? null, waiting: Math.max(0, answerable.length - 1), unread };
+}

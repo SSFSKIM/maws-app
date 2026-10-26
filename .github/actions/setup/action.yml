@@ -1,0 +1,79 @@
+name: MAWS gate setup
+description: >-
+  The shared setup of .github/workflows/gate.yml (docs/doperpowers/plans/2026-10-14-gate-offload.md §3.2), run after
+  the checkout: pnpm from packageManager, Node 22 and the frozen install. Hosted Linux jobs cache the pnpm store and
+  Electron's download by its version; the self-hosted runners (the macOS runner, ci-kit's pool) rely on their own disks
+  and take pnpm through corepack, never pnpm/action-setup.
+  Every lane applies .github/ci-kit.yml. On Linux, e2e jobs also lift Electron's sandbox restriction, and groups that
+  render documents through LibreOffice install it separately.
+inputs:
+  e2e:
+    description: Lift the apparmor restriction on unprivileged user namespaces for Electron's sandbox.
+    default: 'false'
+  libreoffice:
+    description: Install LibreOffice Writer and Impress.
+    default: 'false'
+  apt:
+    description: More apt packages for a Linux runner, space-separated.
+    default: ''
+runs:
+  using: composite
+  steps:
+    - if: runner.environment != 'self-hosted'
+      uses: pnpm/action-setup@v6
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 22
+        cache: ${{ runner.environment == 'github-hosted' && runner.os == 'Linux' && 'pnpm' || '' }}
+    # On a self-hosted runner (ci-kit's pool, Decision Log 35; the macOS runner, Decision Log 42) pnpm comes through
+    # corepack at packageManager's version, so no job switches versions: on a pool box, whose pnpm store is shared
+    # between jobs, pnpm/action-setup's self-update breaks from the box's second job on; on the Mac the switch (11.19.0
+    # to 11.23.0 in run 38866065402's e2e:tools job) spawned `open`, which put a URL in the owner's browser. The shims go
+    # to the job's own directory, not Node's shared tool cache.
+    - if: runner.environment == 'self-hosted'
+      shell: bash
+      run: |
+        mkdir -p "$RUNNER_TEMP/bin"
+        corepack enable --install-directory "$RUNNER_TEMP/bin"
+        echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+        echo COREPACK_ENABLE_DOWNLOAD_PROMPT=0 >>"$GITHUB_ENV"
+        COREPACK_ENABLE_DOWNLOAD_PROMPT=0 "$RUNNER_TEMP/bin/pnpm" --version
+    - id: electron
+      shell: bash
+      run: echo "version=$(node -p "require('./package.json').devDependencies.electron")" >> "$GITHUB_OUTPUT"
+    # The pool's caches are baked into its box and shared, so a restore there would unpack under other jobs.
+    - uses: actions/cache@v6
+      if: runner.environment == 'github-hosted' && runner.os == 'Linux'
+      with:
+        path: ~/.cache/electron
+        key: electron-${{ runner.os }}-${{ runner.arch }}-${{ steps.electron.outputs.version }}
+    - uses: SSFSKIM/ci-kit/setup@v1
+      with:
+        install: 'true'
+    # Group-specific Linux packages; the declaration supplies every lane's common tools and macOS's LibreOffice.
+    - if: runner.os == 'Linux' && (inputs.libreoffice == 'true' || inputs.apt != '')
+      shell: bash
+      env:
+        LIBREOFFICE: ${{ inputs.libreoffice }}
+        APT: ${{ inputs.apt }}
+      run: |
+        read -ra packages <<<"$APT"
+        if [[ $LIBREOFFICE == true ]]; then packages+=(libreoffice-writer libreoffice-impress); fi
+        # Only what is missing: ci-kit's pool image carries these, and apt there cost ~35 s a job (static, each unit
+        # shard) and failed outright when the git-core PPA answered 503 (run 39630489726).
+        missing=()
+        for p in "${packages[@]}"; do
+          dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'ok installed' || missing+=("$p")
+        done
+        if (( ${#missing[@]} )); then
+          sudo apt-get update -q -o Acquire::Retries=3
+          sudo apt-get install -yq --no-install-recommends "${missing[@]}"
+        else
+          echo "apt: ${packages[*]} already installed"
+        fi
+        if [[ $LIBREOFFICE == true ]]; then soffice --version; fi
+    # Electron's renderer sandbox needs unprivileged user namespaces, which Ubuntu 24.04's apparmor restricts; the app
+    # keeps its sandbox (never --no-sandbox), so the runner lifts the restriction.
+    - if: runner.os == 'Linux' && inputs.e2e == 'true'
+      shell: bash
+      run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

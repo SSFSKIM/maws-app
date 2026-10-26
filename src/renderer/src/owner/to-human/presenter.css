@@ -1,0 +1,2 @@
+/* The fallback's only output-style treatment: the mod's message ink, in the authored Markdown flow. */
+.owner-message-ink { color: var(--accent); }

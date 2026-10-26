@@ -1,0 +1,314 @@
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, expect, it } from 'vitest';
+import type { AppSessionId } from '@shared/graph/ids';
+import { status } from '../../../../../test/support/builders';
+import { fakeClient } from '../../../../../test/support/fake-client';
+import { connectEngineSurface } from '../../engine-surface/site';
+import { invalidateSession, resetSurfaceRegistry } from '../../engine-surface/registry';
+import { useSessions } from '../../stores/sessions';
+import { useTranscriptStore } from '../../stores/transcript';
+import { expandedTurnRows, turnDerivations } from '../model/derive';
+import { api, builder } from '../model/test-events';
+import { Disclosures, TranscriptProvider, NO_ACTIONS } from '../view/context';
+import { RowView } from '../view/rows/Row';
+import { storeWith } from '../view/rows/test-support';
+
+afterEach(() => { cleanup(); resetSurfaceRegistry(); });
+
+function Transcript({ storeKey, hideCommentary = false, hideDivider = false, variant = 'session' }: { storeKey: string; hideCommentary?: boolean; hideDivider?: boolean; variant?: 'session' | 'child' }) {
+  const rows = useTranscriptStore((s) => s.entries[storeKey].rows);
+  return <TranscriptProvider value={{ storeKey, variant, actions: NO_ACTIONS, rewind: null, renderRequest: null, disclosures: new Disclosures(), idPrefix: 'test', sessionDirectory: null, effort: null }}>{rows.filter((row) => (!hideDivider || row.kind !== 'divider') && (!hideCommentary || row.kind !== 'assistant_text' || row.phase !== 'commentary')).map((row) => <RowView key={row.id} row={row} />)}</TranscriptProvider>;
+}
+
+it('keeps the first expanded commentary drawing mounted when ink promotes it to full contrast', async () => {
+  const b = builder(); b.turn('u'); b.text('first', 0, 'Update');
+  b.toolUse('t', 'Bash', { command: 'pwd' }); b.result('t', '/tmp');
+  b.text('last', 0, 'Answer'); b.end(['u']);
+  const store = await storeWith(b.events); const id = store.key as AppSessionId;
+  useTranscriptStore.getState().expandAll(store.key);
+  const fake = fakeClient(); window.maws = fake.client;
+  useSessions.setState({ engine: new Map([[id, { ...status(id), uiSurface: { clientId: 'maws-main' } }]]) });
+  render(<Transcript storeKey={store.key} />);
+  expect(screen.getByText('Update').closest('.transcript-commentary')).not.toBeNull();
+  const asks = fake.invoked('session.ui.render') as { component: string; props: { text?: string } }[];
+  for (const ask of asks) await act(() => fake.reply('session.ui.render', {
+    hooked: ask.component === 'AssistantMessage', rewritten: false, props: ask.props,
+    tree: ask.props.text === 'Update' ? { type: 'Box', children: [{ type: 'Text', children: ['accepted drawing'] }, { type: 'engine', ref: 0 }] } : { type: 'engine', ref: 0 },
+  }));
+  expect(fake.invoked('session.ui.render')).toHaveLength(asks.length);
+  expect(screen.getByText('accepted drawing')).toBeTruthy();
+  expect(screen.getByText('Update').closest('.transcript-commentary')).toBeNull();
+  expect(store.rows().find((r) => r.kind === 'assistant_text' && r.markdown === 'Update')).toMatchObject({ forHuman: true });
+});
+
+it.each([false, true])('probes folded assistant text, preserves ink in order at full contrast, and restores T2 on inkless/unhooked (%s) or detach', async (hooked) => {
+  const b = builder(); b.turn('u'); b.text('first', 0, 'Update');
+  b.toolUse('t', 'Bash', { command: 'pwd' }); b.result('t', '/tmp');
+  b.text('last', 0, 'Answer'); b.end(['u']);
+  const store = await storeWith(b.events); const id = store.key as AppSessionId;
+  const fake = fakeClient(); window.maws = fake.client;
+  useSessions.setState({ engine: new Map([[id, { ...status(id), uiSurface: { clientId: 'maws-main' } }]]) });
+  const off = connectEngineSurface(fake.client);
+  render(<Transcript storeKey={store.key} />);
+  const asks = fake.invoked('session.ui.render') as { component: string; props: { text?: string } }[];
+  expect(asks.filter((a) => a.component === 'AssistantMessage').map((a) => a.props.text)).toEqual(['Update', 'Answer']);
+  expect(asks.some((a) => a.component === 'ToolUse')).toBe(false);
+  // User, folded commentary probe, answer: respond to all outstanding sites in their request order.
+  for (const ask of asks) await act(() => fake.reply('session.ui.render', {
+    hooked: ask.component === 'AssistantMessage', rewritten: false, props: ask.props,
+    tree: ask.component === 'AssistantMessage' ? { type: 'Box', children: [{ type: 'Text', children: ['label'] }, { type: 'engine', ref: 0 }] } : { type: 'engine', ref: 0 },
+  }));
+  expect(store.rows().filter((r) => r.kind === 'assistant_text').map((r) => r.markdown)).toEqual(['Update', 'Answer']);
+  expect(screen.getByText('Update').closest('.transcript-commentary')).toBeNull();
+  expect((fake.invoked('session.ui.render') as { component: string }[]).filter((a) => a.component === 'AssistantMessage')).toHaveLength(2);
+  act(() => invalidateSession(id));
+  while (fake.pending('session.ui.render')) await act(() => fake.reply('session.ui.render', { hooked, rewritten: false, props: {}, tree: { type: 'Box' } }));
+  expect(store.rows().filter((r) => r.kind === 'assistant_text')).toHaveLength(1);
+  // Detach clears any session-scoped presentation, including rows outside the mounted range.
+  const state = useTranscriptStore.getState().entries[store.key].state;
+  const first = expandedTurnRows(state, state.order[0]).find((r) => r.kind === 'assistant_text')!;
+  act(() => useTranscriptStore.getState().setAssistantInk(store.key, first.id, first.turnId!, true));
+  act(() => fake.event('session.status', { appSessionId: id, status: { ...status(id), process: 'exited' } }));
+  expect(useTranscriptStore.getState().entries[store.key].state.ui.assistantInk.size).toBe(0);
+  off();
+});
+
+it.each([{ hooked: false, expanded: false }, { hooked: true, expanded: false }, { hooked: false, expanded: true }, { hooked: true, expanded: true }])('holds a promoted button until click with hooked=$hooked, expanded=$expanded', async ({ hooked, expanded }) => {
+  const b = builder(); b.turn('u'); b.text('first', 0, 'Update');
+  b.toolUse('t', 'Bash', { command: 'pwd' }); b.result('t', '/tmp');
+  b.text('last', 0, 'Answer'); b.end(['u']);
+  const store = await storeWith(b.events); const id = store.key as AppSessionId;
+  if (expanded) useTranscriptStore.getState().expandAll(store.key);
+  const fake = fakeClient({ 'session.ui.press': { handled: true } }); window.maws = fake.client;
+  useSessions.setState({ engine: new Map([[id, { ...status(id), uiSurface: { clientId: 'maws-main' } }]]) });
+  render(<Transcript storeKey={store.key} />);
+  const asks = fake.invoked('session.ui.render') as { component: string; props: { text?: string } }[];
+  for (const ask of asks) await act(() => fake.reply('session.ui.render', {
+    hooked: ask.component === 'AssistantMessage', rewritten: false, props: ask.props,
+    tree: ask.props.text === 'Update' ? { type: 'Box', children: [{ type: 'Button', props: { key: 'accept', label: 'Accept' }, press: { plugin: 'test-mod', handle: 7 } }, { type: 'engine', ref: 0 }] } : { type: 'engine', ref: 0 },
+  }));
+  const button = screen.getByRole('button', { name: 'Accept' });
+  fireEvent.pointerDown(button, { button: 0, buttons: 1 });
+  act(() => invalidateSession(id));
+  while (fake.pending('session.ui.render')) await act(() => fake.reply('session.ui.render', { hooked, rewritten: false, props: {}, tree: { type: 'Box' } }));
+  expect(screen.getByRole('button', { name: 'Accept' })).toBe(button);
+  expect(screen.getByText('Update').closest('.transcript-commentary')).toBeNull();
+  expect(store.rows().find((r) => r.kind === 'assistant_text' && r.markdown === 'Update')).toMatchObject({ forHuman: true });
+  fireEvent.pointerUp(button, { button: 0 });
+  fireEvent.click(button);
+  expect(fake.invoked('session.ui.press')).toEqual([{ appSessionId: id, plugin: 'test-mod', handle: 7, key: 'accept' }]);
+  await act(() => new Promise((resolve) => setTimeout(resolve, 1)));
+  expect(screen.queryByRole('button', { name: 'Accept' })).toBeNull();
+  expect(store.rows().filter((r) => r.kind === 'assistant_text')).toHaveLength(expanded ? 2 : 1);
+  if (expanded) expect(screen.getByText('Update').closest('.transcript-commentary')).not.toBeNull();
+  expect((fake.invoked('session.ui.render') as { component: string }[]).filter((a) => a.component === 'AssistantMessage')).toHaveLength(4);
+});
+
+it('hands presentation back to the folded probe when a pressed row virtualizes away, and releases every ask when the divider leaves', async () => {
+  const b = builder(); b.turn('u'); b.text('first', 0, 'Update');
+  b.toolUse('t', 'Bash', { command: 'pwd' }); b.result('t', '/tmp');
+  b.text('last', 0, 'Answer'); b.end(['u']);
+  const store = await storeWith(b.events); const id = store.key as AppSessionId;
+  const fake = fakeClient(); window.maws = fake.client;
+  useSessions.setState({ engine: new Map([[id, { ...status(id), uiSurface: { clientId: 'maws-main' } }]]) });
+  const view = render(<Transcript storeKey={store.key} />);
+  const asks = fake.invoked('session.ui.render') as { component: string; props: { text?: string } }[];
+  for (const ask of asks) await act(() => fake.reply('session.ui.render', {
+    hooked: ask.component === 'AssistantMessage', rewritten: false, props: ask.props,
+    tree: ask.props.text === 'Update' ? { type: 'Button', props: { key: 'accept', label: 'Accept' }, press: { plugin: 'test-mod', handle: 7 } } : { type: 'engine', ref: 0 },
+  }));
+  fireEvent.pointerDown(screen.getByRole('button', { name: 'Accept' }), { button: 0, buttons: 1 });
+  act(() => invalidateSession(id));
+  const pending = fake.pending('session.ui.render');
+  for (let i = 0; i < pending; i++) await act(() => fake.reply('session.ui.render', { hooked: true, rewritten: false, props: {}, tree: { type: 'engine', ref: 0 } }));
+  expect(screen.getByRole('button', { name: 'Accept' })).toBeTruthy();
+  // The virtualizer can remove a promoted row independently of its still-mounted divider.
+  view.rerender(<Transcript storeKey={store.key} hideCommentary />);
+  expect(store.rows().filter((r) => r.kind === 'assistant_text')).toHaveLength(1);
+  expect(useTranscriptStore.getState().entries[store.key].state.ui.assistantInk.size).toBe(0);
+  const count = fake.invoked('session.ui.render').length;
+  expect(count).toBe(asks.length * 2);
+  view.unmount();
+  act(() => invalidateSession(id));
+  expect(fake.invoked('session.ui.render')).toHaveLength(count);
+  expect(fake.pending('session.ui.render')).toBe(0);
+  // A later divider mount can promote the row again; stale ownership must not suppress its probe.
+  render(<Transcript storeKey={store.key} />);
+  const remounted = fake.invoked('session.ui.render').slice(count) as typeof asks;
+  expect(remounted).toHaveLength(asks.length);
+  for (const ask of remounted) await act(() => fake.reply('session.ui.render', {
+    hooked: ask.component === 'AssistantMessage', rewritten: false, props: ask.props,
+    tree: ask.props.text === 'Update' ? { type: 'Text', children: ['returned drawing'] } : { type: 'engine', ref: 0 },
+  }));
+  expect(screen.getByText('returned drawing')).toBeTruthy();
+  expect(fake.invoked('session.ui.render')).toHaveLength(count + asks.length);
+});
+
+it.each([false, true])('does not derive large folded history during live token batches (attached=%s)', async (attached) => {
+  const b = builder();
+  for (let turn = 0; turn < 6; turn++) {
+    b.turn(`old-${turn}`);
+    for (let n = 0; n < 100; n++) {
+      b.text(`text-${turn}-${n}`, 0, `Commentary ${n}`);
+      b.toolUse(`tool-${turn}-${n}`, 'Bash', { command: 'pwd' });
+      b.result(`tool-${turn}-${n}`, '/tmp');
+    }
+    b.text(`answer-${turn}`, 0, 'Answer'); b.end([`old-${turn}`]);
+  }
+  b.turn('live');
+  b.emit('assistant.block.delta', { apiMessageId: api('live'), blockIndex: 0, blockType: 'text', textDelta: 'start', thinkingDelta: null, inputJsonDelta: null, userMessageUuid: null });
+  const store = await storeWith(b.events.slice()); const id = store.key as AppSessionId;
+  const fake = fakeClient(); window.maws = fake.client;
+  useSessions.setState({ engine: new Map([[id, { ...status(id), uiSurface: attached ? { clientId: 'maws-main' } : undefined }]]) });
+  const view = render(<Transcript storeKey={store.key} />);
+  const before = turnDerivations.count;
+  const start = performance.now();
+  for (let n = 0; n < 40; n++) {
+    const event = b.emit('assistant.block.delta', { apiMessageId: api('live'), blockIndex: 0, blockType: 'text', textDelta: ' next', thinkingDelta: null, inputJsonDelta: null, userMessageUuid: null });
+    act(() => store.push([event]));
+  }
+  const derivations = turnDerivations.count - before;
+  expect(screen.getByText('start' + ' next'.repeat(40))).toBeTruthy();
+  console.info(`FX3 folded benchmark attached=${attached}: 6 turns x 100 tool calls, 40 batches, ${derivations} derivations, ${(performance.now() - start).toFixed(1)} ms`);
+  view.unmount();
+  expect(derivations).toBe(0);
+});
+
+it.each(['session', 'child'] as const)('R4 presents detached marked commentary outside the fold (%s), preserving surrounding text in the same flow', async (variant) => {
+  const b = builder(); b.turn('u'); b.text('first', 0, 'Working notes.\n<to-human>Report.</to-human>');
+  b.toolUse('t', 'Bash', { command: 'pwd' }); b.result('t', '/tmp');
+  b.text('last', 0, 'Answer'); b.end(['u']);
+  const store = await storeWith(b.events);
+  const fake = fakeClient(); window.maws = fake.client; useSessions.setState({ engine: new Map() });
+  const view = render(<Transcript storeKey={store.key} variant={variant} />);
+  expect(screen.getByText('Report.').closest('.transcript-answer')).not.toBeNull();
+  expect(store.rows().find((r) => r.kind === 'assistant_text' && r.markdown.includes('Report.'))).toMatchObject({ forHuman: true });
+  expect(screen.getByText('Working notes.')).toBeTruthy();
+  act(() => useTranscriptStore.getState().expandAll(store.key));
+  expect(screen.getByText('Working notes.').closest('.transcript-answer')).not.toBeNull();
+  expect(view.container.querySelectorAll('.owner-message-ink')).toHaveLength(1);
+  expect(fake.invoked('session.ui.render')).toHaveLength(0);
+});
+
+it('keeps a mixed answer intact without inventing a within-message fold', async () => {
+  const b = builder(); b.turn('u'); b.text('only', 0, 'Private notes.\n<to-human>Report.</to-human>'); b.end(['u']);
+  const store = await storeWith(b.events); useSessions.setState({ engine: new Map() });
+  render(<Transcript storeKey={store.key} />);
+  expect(screen.getByText('Report.')).toBeTruthy();
+  expect(screen.getByText('Private notes.').closest('.transcript-answer')).not.toBeNull();
+  expect(screen.queryByRole('button', { name: 'Working record' })).toBeNull();
+});
+
+it('R4 keeps detached ordinary commentary folded and ordinary answers native', async () => {
+  const b = builder(); b.turn('u'); b.text('first', 0, 'Working notes.');
+  b.toolUse('t', 'Bash', { command: 'pwd' }); b.result('t', '/tmp');
+  b.text('last', 0, 'Native answer'); b.end(['u']);
+  const store = await storeWith(b.events); useSessions.setState({ engine: new Map() });
+  const view = render(<Transcript storeKey={store.key} />);
+  expect(screen.queryByText('Working notes.')).toBeNull();
+  expect(screen.getByText('Native answer').closest('.transcript-answer')).not.toBeNull();
+  expect(view.container.querySelector('[data-owner-report]')).toBeNull();
+});
+
+it.each([false, true])('R4 retains local promotion through resume with its divider virtualized, then yields to mod/native (hooked=%s)', async (hooked) => {
+  const b = builder(); b.turn('u'); b.text('first', 0, '<to-human>Local report.</to-human>');
+  b.toolUse('t', 'Bash', { command: 'pwd' }); b.result('t', '/tmp');
+  b.text('last', 0, 'Native answer'); b.end(['u']);
+  const store = await storeWith(b.events); const id = store.key as AppSessionId;
+  const fake = fakeClient(); window.maws = fake.client; useSessions.setState({ engine: new Map() });
+  const off = connectEngineSurface(fake.client);
+  try {
+    const view = render(<Transcript storeKey={store.key} />);
+    expect(screen.getByText('Local report.')).toBeTruthy();
+    view.rerender(<Transcript storeKey={store.key} hideDivider />);
+    for (const process of ['initializing', 'exited'] as const) {
+      act(() => {
+        const next = { ...status(id), process };
+        useSessions.setState({ engine: new Map([[id, next]]) });
+        fake.event('session.status', { appSessionId: id, status: next });
+      });
+      expect(screen.getByText('Local report.')).toBeTruthy();
+      expect(store.rows().find((r) => r.kind === 'assistant_text' && r.markdown.includes('Local report.'))).toMatchObject({ forHuman: true });
+    }
+    act(() => {
+      const next = { ...status(id), uiSurface: { clientId: 'maws-main' } };
+      useSessions.setState({ engine: new Map([[id, next]]) });
+      fake.event('session.status', { appSessionId: id, status: next });
+    });
+    expect(view.container.querySelector('[data-owner-report]')).toBeNull();
+    const asks = fake.invoked('session.ui.render') as { component: string; props: { text?: string } }[];
+    for (const ask of asks) await act(() => fake.reply('session.ui.render', {
+      hooked: ask.component === 'AssistantMessage', rewritten: false, props: ask.props,
+      tree: ask.props.text?.includes('Local report.') ? { type: 'Text', children: ['Mod report'] } : { type: 'engine', ref: 0 },
+    }));
+    expect(screen.getByText('Mod report')).toBeTruthy();
+    act(() => invalidateSession(id));
+    while (fake.pending('session.ui.render')) await act(() => fake.reply('session.ui.render', { hooked, rewritten: false, props: {}, tree: { type: 'engine', ref: 0 } }));
+    expect(screen.queryByText('Mod report')).toBeNull();
+    expect(store.rows().filter((r) => r.kind === 'assistant_text')).toHaveLength(2);
+    expect(screen.getByText('Local report.')).toBeTruthy();
+  } finally { off(); }
+});
+
+it.each([
+  { marked: true, mounted: true }, { marked: false, mounted: true }, { marked: true, mounted: false },
+])('R4 hands off attached promotion on detach with divider virtualized (marked=$marked, mounted=$mounted)', async ({ marked, mounted }) => {
+  const text = marked ? '<to-human>Local report.</to-human>' : 'Ordinary commentary.';
+  const b = builder(); b.turn('u'); b.text('first', 0, text);
+  b.toolUse('t', 'Bash', { command: 'pwd' }); b.result('t', '/tmp');
+  b.text('last', 0, 'Native answer'); b.end(['u']);
+  const store = await storeWith(b.events); const id = store.key as AppSessionId;
+  const fake = fakeClient(); window.maws = fake.client;
+  useSessions.setState({ engine: new Map([[id, { ...status(id), uiSurface: { clientId: 'maws-main' } }]]) });
+  const off = connectEngineSurface(fake.client);
+  try {
+    const view = render(<Transcript storeKey={store.key} />);
+    const asks = fake.invoked('session.ui.render') as { component: string; props: { text?: string } }[];
+    for (const ask of asks) await act(() => fake.reply('session.ui.render', {
+      hooked: ask.component === 'AssistantMessage', rewritten: false, props: ask.props,
+      tree: ask.props.text === text ? { type: 'Text', children: ['Mod report'] } : { type: 'engine', ref: 0 },
+    }));
+    expect(screen.getByText('Mod report')).toBeTruthy();
+    view.rerender(<Transcript storeKey={store.key} hideDivider hideCommentary={!mounted} />);
+    act(() => {
+      const next = { ...status(id), process: 'exited' as const };
+      // Cleanup can precede the React commit which switches the mounted drawing to local/native.
+      fake.event('session.status', { appSessionId: id, status: next });
+      useSessions.setState({ engine: new Map([[id, next]]) });
+    });
+    expect(screen.queryByText('Mod report')).toBeNull();
+    if (marked && mounted) {
+      expect(screen.getByText('Local report.')).toBeTruthy();
+      expect(store.rows().find((r) => r.kind === 'assistant_text' && r.markdown === text)).toMatchObject({ forHuman: true });
+    } else {
+      expect(store.rows().filter((r) => r.kind === 'assistant_text')).toHaveLength(1);
+      expect(useTranscriptStore.getState().entries[store.key].state.ui.assistantInk.size).toBe(0);
+    }
+  } finally { off(); }
+});
+
+it('R4 yields exclusively to an attached surface, including native fallback, and returns on detach', async () => {
+  const b = builder(); b.turn('u'); b.text('first', 0, '<to-human>Local report.</to-human>');
+  b.toolUse('t', 'Bash', { command: 'pwd' }); b.result('t', '/tmp');
+  b.text('last', 0, 'Native answer'); b.end(['u']);
+  const store = await storeWith(b.events); const id = store.key as AppSessionId;
+  const fake = fakeClient(); window.maws = fake.client; useSessions.setState({ engine: new Map() });
+  const view = render(<Transcript storeKey={store.key} />);
+  expect(screen.getByText('Local report.')).toBeTruthy();
+  act(() => useSessions.setState({ engine: new Map([[id, { ...status(id), uiSurface: { clientId: 'maws-main' } }]]) }));
+  expect(view.container.querySelector('[data-owner-report]')).toBeNull();
+  const asks = fake.invoked('session.ui.render') as { component: string; props: { text?: string } }[];
+  for (const ask of asks) await act(() => fake.reply('session.ui.render', {
+    hooked: ask.component === 'AssistantMessage', rewritten: false, props: ask.props,
+    tree: ask.props.text?.includes('Local report.') ? { type: 'Text', children: ['Mod report'] } : { type: 'engine', ref: 0 },
+  }));
+  expect(screen.getByText('Mod report')).toBeTruthy();
+  expect(screen.getByText('Local report.').closest('[aria-hidden="true"]')).not.toBeNull();
+  act(() => invalidateSession(id));
+  while (fake.pending('session.ui.render')) await act(() => fake.reply('session.ui.render', { hooked: false, rewritten: false, props: {}, tree: { type: 'engine', ref: 0 } }));
+  expect(view.container.querySelector('[data-owner-report]')).toBeNull();
+  expect(screen.queryByText('Mod report')).toBeNull();
+  act(() => useSessions.setState({ engine: new Map([[id, { ...status(id), process: 'exited' }]]) }));
+  expect(screen.getByText('Local report.')).toBeTruthy();
+  expect(store.rows().find((r) => r.kind === 'assistant_text' && r.markdown.includes('Local report.'))).toMatchObject({ forHuman: true });
+});

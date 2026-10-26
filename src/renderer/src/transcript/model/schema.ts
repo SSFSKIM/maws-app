@@ -1,0 +1,145 @@
+// Zod schemas for X3 rows, used only by the snapshot suite to validate every derived row (C6 execution document,
+// "Interfaces and Dependencies": X3 is TypeScript types because rows never cross a process). Kept beside rows.ts
+// rather than inside it so the types file stays the readable contract.
+import * as z from 'zod';
+import { DENIAL_KINDS, PLAN_OUTCOMES, SAFEGUARD_VERDICTS } from '@shared/graph/enums';
+import { ContentBlockSchema, QuestionSchema, TokenUsageSchema } from '@shared/graph/events';
+import { AskCancelReasonSchema } from '@shared/maws/ask'; // E1
+import { AskAnswerSchema, AskQuestionSchema } from '@shared/maws/tools'; // E1
+import { ANCHOR_KINDS, AnchorSchema } from '@shared/anchor/anchor'; // E3
+import { BROWSER_TOOL_NAMES, BrowserWaitReasonSchema } from '@shared/maws/browser'; // E4c
+import { BrowserActivitySchema } from '@shared/browser/activity'; // E13
+import { TOOL_CATEGORIES } from './rows';
+
+const nullable = <T extends z.ZodType>(schema: T) => schema.nullable();
+const category = z.enum(TOOL_CATEGORIES);
+const disposition = z.enum(['denied', 'auto_denied', 'stopped']);
+
+export const ToolClassificationSchema = z.strictObject({
+  groupable: z.boolean(), hidden: z.boolean(), category,
+  denial: nullable(z.strictObject({ kind: z.enum(DENIAL_KINDS), disposition, interruption: z.boolean(), reason: nullable(z.string()) })),
+  subagentLifecycle: nullable(z.enum(['start', 'progress', 'finish', 'message'])), startsGroup: z.boolean(), safeguard: z.enum(SAFEGUARD_VERDICTS), humanDecision: z.boolean(),
+});
+
+const TruncationSchema = z.strictObject({ shownHead: z.number(), shownTail: z.number(), omittedBytes: z.number() });
+const SpillSchema = z.strictObject({ path: z.string(), bytes: nullable(z.number()), state: z.enum(['not_loaded', 'loading', 'loaded', 'partial', 'failed']), content: nullable(z.string()) });
+const HunkSchema = z.strictObject({ oldStart: z.number(), oldLines: z.number(), newStart: z.number(), newLines: z.number(), lines: z.array(z.string()) });
+const result = z.union([z.string(), z.array(ContentBlockSchema)]);
+
+export const CellDetailSchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('shell'), command: z.string(), description: nullable(z.string()), cwd: nullable(z.string()), stdout: z.string(), stderr: z.string(), exitCode: nullable(z.number()),
+    interrupted: z.boolean(), backgroundTaskId: nullable(z.string()), truncated: nullable(TruncationSchema), spill: nullable(SpillSchema),
+  }),
+  z.strictObject({ kind: z.literal('edit'), filePath: z.string(), change: z.enum(['create', 'update', 'delete']), hunks: z.array(HunkSchema), added: z.number(), removed: z.number() }),
+  z.strictObject({ kind: z.literal('read'), files: z.array(z.strictObject({ path: z.string(), range: nullable(z.tuple([z.number(), z.number()])) })), preview: nullable(z.string()), truncated: nullable(TruncationSchema) }),
+  z.strictObject({ kind: z.literal('search'), query: z.string(), scope: nullable(z.string()), matches: nullable(z.number()), output: z.string(), truncated: nullable(TruncationSchema) }),
+  z.strictObject({ kind: z.literal('web'), url: nullable(z.string()), query: nullable(z.string()), output: z.string(), truncated: nullable(TruncationSchema) }),
+  z.strictObject({ kind: z.literal('mcp'), server: z.string(), tool: z.string(), input: z.unknown(), result, structured: z.unknown(), spill: nullable(SpillSchema) }),
+  z.strictObject({ kind: z.literal('image'), images: z.array(z.strictObject({ dataUrl: z.string(), mediaType: z.string(), alt: nullable(z.string()) })), caption: nullable(z.string()) }),
+  z.strictObject({ kind: z.literal('thinking'), text: z.string(), durationMs: nullable(z.number()) }),
+  z.strictObject({ kind: z.literal('generic'), input: z.unknown(), result, structured: z.unknown(), isError: z.boolean(), spill: nullable(SpillSchema), truncated: nullable(TruncationSchema) }),
+]);
+
+const SubagentRefSchema = z.strictObject({
+  taskId: z.string(), agentId: nullable(z.string()), toolUseId: nullable(z.string()), name: z.string(), glyph: z.number().int().min(0).max(7), kind: z.enum(['agent', 'workflow']), subagentType: nullable(z.string()),
+  runId: z.string().optional(), // E7
+});
+
+const cellShape = {
+  id: z.string(), toolUseId: nullable(z.string()), toolName: z.string(), category, classification: ToolClassificationSchema,
+  status: z.enum(['running', 'done', 'error', 'denied', 'stopped']), label: z.string(), summary: z.string().optional(), paths: z.array(z.string()), startedAt: z.string(), endedAt: nullable(z.string()),
+  detail: CellDetailSchema, expanded: z.boolean(), agent: nullable(SubagentRefSchema),
+};
+export const CellSchema = z.strictObject(cellShape);
+
+export const TurnSummarySchema = z.strictObject({
+  durationMs: nullable(z.number()), toolCalls: z.number(), byCategory: z.strictObject(Object.fromEntries(TOOL_CATEGORIES.map((c) => [c, z.number()])) as Record<(typeof TOOL_CATEGORIES)[number], z.ZodNumber>),
+  denials: z.array(z.strictObject({ kind: z.enum(DENIAL_KINDS), cellId: z.string(), disposition, interruption: z.boolean() })), autoDenied: z.number(),
+  safeguard: z.strictObject({ reviewed: z.number(), flagged: z.number(), notEvaluated: z.number() }),
+  costUsd: nullable(z.number()), usage: nullable(TokenUsageSchema), model: nullable(z.string()), childAgents: z.number(), terminalReason: nullable(z.string()),
+});
+
+const base = { id: z.string(), turnId: nullable(z.string()), at: z.string() };
+// E7 start: a message between sessions (rows.ts's PeerMessage)
+const PeerMessageSchema = z.strictObject({
+  sender: nullable(z.strictObject({ name: nullable(z.string()), address: z.string(), session: nullable(z.string()) })), recipient: nullable(z.strictObject({ name: nullable(z.string()), address: z.string() })), body: z.string(), preview: z.string(),
+  replyTo: nullable(z.string()), toolUseId: nullable(z.string()), messageUuid: nullable(z.string()), result: nullable(z.enum(['pending', 'sent', 'failed', 'unanswered' /* E11 */])), resultText: nullable(z.string()), summary: nullable(z.string()),
+});
+// E7 end
+const AttachmentSchema = z.strictObject({ kind: z.enum(['image', 'file', 'text']), name: z.string(), bytes: nullable(z.number()), dataUrl: nullable(z.string()), mediaType: nullable(z.string()), text: nullable(z.string()) });
+
+export const RowSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ ...base, kind: z.literal('time'), label: z.string() }),
+  z.strictObject({ ...base, kind: z.literal('user'), messageUuid: nullable(z.string()), text: z.string(), attachments: z.array(AttachmentSchema), placeholders: z.array(z.number().int()), lines: z.number(), editable: z.boolean(), steer: z.boolean(), dropped: z.boolean(), pending: z.enum(['next', 'held']).optional(), anchor: AnchorSchema.optional() /* E3 */, anchorFrame: z.strictObject({ destination: nullable(z.enum(['thread', 'main'])), screenshot: z.boolean() }).optional() /* E11 */ }),
+  z.strictObject({ ...base, kind: z.literal('assistant_text'), messageUuid: nullable(z.string()), blockIndex: z.number(), markdown: z.string(), live: z.boolean(), phase: z.enum(['answer', 'commentary']), model: nullable(z.string()) }),
+  z.strictObject({
+    ...base, kind: z.literal('divider'), state: z.enum(['working', 'completed', 'stopped', 'failed']), cause: z.literal('crash').optional() /* E11 */, origin: z.enum(['human', 'engine', 'peer']), startedAt: z.string(), endedAt: nullable(z.string()),
+    toolCalls: z.number(), denied: z.number(), autoDenied: z.number(), firstDeniedCell: nullable(z.string()), expanded: z.boolean(), summary: TurnSummarySchema,
+    files: z.array(z.strictObject({ path: z.string(), change: z.enum(['create', 'update', 'delete']), added: z.number(), removed: z.number(), cellId: z.string() })).optional(),
+  }),
+  z.strictObject({ ...base, kind: z.literal('group'), state: z.enum(['active', 'completed']), cells: z.array(CellSchema), summary: z.string(), activeLabel: nullable(z.string()), icon: category, expanded: z.boolean() }),
+  z.strictObject({ ...base, kind: z.literal('cell'), ...cellShape }),
+  z.strictObject({
+    ...base, kind: z.literal('receipt'), files: z.array(z.strictObject({ path: z.string(), change: z.enum(['create', 'update', 'delete']), added: z.number(), removed: z.number(), cellId: z.string() })),
+    added: z.number(), removed: z.number(), state: z.enum(['applied', 'undoing', 'undone', 'reapplying']), canUndo: z.boolean(), canReapply: z.boolean(),
+  }),
+  z.strictObject({ ...base, kind: z.literal('subagent'), agents: z.array(SubagentRefSchema), sentence: z.string(), status: z.enum(['started', 'working', 'finished', 'finished_with_errors', 'stopped']), overflow: z.number() }),
+  z.strictObject({
+    ...base, kind: z.literal('agent_message'), direction: z.enum(['to_child', 'from_child', 'between']), from: nullable(SubagentRefSchema), to: nullable(SubagentRefSchema), text: z.string(),
+    peer: PeerMessageSchema.optional(), report: z.string().optional(), body: z.string().optional(), // E7
+  }),
+  z.strictObject({ ...base, kind: z.literal('thinking'), messageUuid: nullable(z.string()), text: z.string(), live: z.boolean(), durationMs: nullable(z.number()) }),
+  z.strictObject({ ...base, kind: z.literal('plan'), toolUseId: z.string(), plan: z.string(), outcome: nullable(z.enum(PLAN_OUTCOMES)), feedback: nullable(z.string()) }),
+  z.strictObject({ ...base, kind: z.literal('question'), toolUseId: z.string(), questions: z.array(QuestionSchema), answers: nullable(z.record(z.string(), z.string())), error: nullable(z.string()) /* E1 */ }),
+  z.strictObject({
+    ...base, kind: z.literal('request_slot'), requestId: z.string(), toolUseId: nullable(z.string()), requestKind: z.enum(['permission', 'question', 'plan', 'dialog', 'elicitation']), toolName: nullable(z.string()), requestedAt: z.string(),
+  }),
+  z.strictObject({
+    ...base, kind: z.literal('error'), severity: z.enum(['transient', 'error', 'notice']), text: z.string(), attempt: nullable(z.strictObject({ n: z.number(), max: nullable(z.number()) })),
+    scope: z.enum(['turn', 'task', 'process', 'transport', 'request', 'api', 'reconnect', 'notice', 'exit', 'hook', 'plugin' /* R1 */]), lostAttentionCount: nullable(z.number()),
+    action: z.enum(['edit_prompt', 'engine_settings']).optional(), // W13: engine_settings
+  }),
+  z.strictObject({ ...base, kind: z.literal('boundary'), boundaryKind: z.enum(['compaction', 'reset', 'retraction', 'rewind']), text: z.string(), secondary: z.string().optional(), detail: nullable(z.string()), hiddenRows: z.number(), revealed: z.boolean() }),
+  z.strictObject({ ...base, kind: z.literal('bash'), command: z.string(), stdout: z.string(), stderr: z.string(), exitCode: nullable(z.number()), cwd: nullable(z.string()) }),
+  z.strictObject({ ...base, kind: z.literal('local_command'), messageUuid: nullable(z.string()), text: z.string() }),
+  // E1 start
+  z.strictObject({
+    ...base, kind: z.literal('ask'), toolUseId: z.string(), askId: z.string(), title: nullable(z.string()), context: nullable(z.string()), blocking: z.boolean(), questions: z.array(AskQuestionSchema),
+    state: z.enum(['pending', 'asked', 'answered', 'cancelled', 'error']), answers: nullable(z.array(AskAnswerSchema)), error: nullable(z.string()), cancelReason: nullable(AskCancelReasonSchema),
+  }),
+  z.strictObject({
+    ...base, kind: z.literal('delivery'), toolUseId: z.string(), files: z.array(z.strictObject({ path: z.string(), name: z.string(), id: nullable(z.string()) })), caption: nullable(z.string()),
+    urgency: z.enum(['normal', 'high']), error: nullable(z.string()), neverAnswered: z.literal(true).optional() /* E11 */,
+  }),
+  // E1 end
+  // E3 start
+  z.strictObject({
+    ...base, kind: z.literal('side_thread'), childAppSessionId: z.string(), label: nullable(z.string()), anchorKind: nullable(z.enum(ANCHOR_KINDS)), openedBy: nullable(z.enum(['comment', 'btw'])),
+    state: z.enum(['opened', 'finished', 'failed']), text: nullable(z.string()), turns: z.number().int().nonnegative(),
+  }),
+  // E3 end
+  // E7 start
+  z.strictObject({
+    ...base, kind: z.literal('agent_list'), toolUseId: z.string(), self: nullable(z.string()),
+    sections: z.array(z.strictObject({ title: z.enum(['Subagents', 'Teammates', 'Peer sessions']), count: z.number().int(), rows: z.array(z.strictObject({ name: z.string(), ref: nullable(z.string()), extras: z.array(z.string()) })) })),
+    notes: z.array(z.string()), raw: z.string(), pending: z.boolean(), neverAnswered: z.literal(true).optional() /* E11 */,
+  }),
+  // E7 end
+  // E2 start
+  z.strictObject({
+    ...base, kind: z.literal('artifact'), toolUseId: z.string(), action: z.enum(['create', 'update']), artifactId: z.string(), title: nullable(z.string()), htmlPath: z.string(),
+    deliverableId: nullable(z.string()), version: nullable(z.number()), error: nullable(z.string()), answered: z.boolean(), neverAnswered: z.literal(true).optional() /* E11 */,
+  }),
+  // E2 end
+  // E4c start
+  z.strictObject({
+    ...base, kind: z.literal('browser_action'), toolUseId: z.string(), tool: z.enum(BROWSER_TOOL_NAMES), action: z.string(), tabId: nullable(z.string()), target: nullable(z.string()),
+    targetRole: nullable(z.string()), targetName: nullable(z.string()), value: nullable(z.string()), url: nullable(z.string()), title: nullable(z.string()), ms: nullable(z.number()),
+    deliverableId: nullable(z.string()), error: nullable(z.string()), waitedFor: nullable(BrowserWaitReasonSchema), waitedMs: nullable(z.number()), chars: nullable(z.number()),
+    truncated: z.boolean(), tabCount: nullable(z.number()), state: z.enum(['running', 'done', 'error', 'cancelled']), detail: nullable(z.string()), answered: z.boolean(),
+  }),
+  // E4c end
+  z.strictObject({ ...base, kind: z.literal('browser_activity'), toolUseId: nullable(z.string()), appSessionId: z.string(), tabId: z.string(), activity: BrowserActivitySchema }), // E13
+  z.strictObject({ ...base, kind: z.literal('to_human'), toolUseId: z.string(), text: z.string().min(1), pending: z.boolean() }), // P4-R7
+]);

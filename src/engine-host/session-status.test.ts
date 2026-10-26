@@ -1,0 +1,81 @@
+// E8 M1 (D-13): a successful reload_plugins answer replaces the status's plugins, so the "Loaded in this session" list
+// and the panel's count follow a reload without waiting for the next turn's system/init. The answer's items carry init's
+// four fields (pass3/e8-plugins-reload seq 31 against seq 26); its errors are only a count, so the init's stay.
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { LaunchSpecSchema } from '@shared/engine/launch-spec';
+import { ReloadPluginsResponseSchema } from '@shared/wire/control';
+import { SessionStatusTracker } from './session-status';
+
+const ROOT = resolve(__dirname, '../..');
+const fixtureRow = (seq: number) =>
+  readFileSync(resolve(ROOT, 'spikes/protocol-probe/fixtures/pass3/e8-plugins-reload.jsonl'), 'utf8')
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as { seq: number; frame: Record<string, unknown> })
+    .find((row) => row.seq === seq)!.frame;
+
+const spec = LaunchSpecSchema.parse({
+  appSessionId: 'app-status', cwd: '/tmp/r', additionalDirectories: [], model: null, effort: null, permissionMode: null, gateway: 'gateway', subagentModel: null,
+  resume: null, sessionId: null, trust: null, mcpConfig: null, extraSettings: null, maxBudgetUsd: null, inheritGrantsFrom: null, replay: null,
+});
+
+describe('SessionStatusTracker.applyReload', () => {
+  it('replaces the plugins with the reload answer’s, as init would list them, and keeps the init’s errors and warnings', () => {
+    const tracker = new SessionStatusTracker(spec, () => {});
+    tracker.observe({
+      type: 'system', subtype: 'init',
+      plugins: [{ name: 'old', path: '/p/old', source: 'old@m', version: '1.0.0' }],
+      plugin_errors: [{ plugin: 'broken', type: 'manifest', message: 'bad json', path: '/p/broken' }],
+      plugin_warnings: [{ plugin: 'old', type: 'shadowed', message: 'shadowed by user' }],
+    }, '2026-10-06T02:52:07.000Z');
+    const answer = ReloadPluginsResponseSchema.parse((fixtureRow(31).response as { response: unknown }).response);
+    tracker.applyReload(answer);
+    const status = tracker.snapshot();
+    expect(status.plugins).toEqual([
+      { name: 'e8-probe', path: '/tmp/e8-g0/run1/market/plugins/e8-probe', source: 'e8-probe@e8-scratch', version: '0.1.0' },
+      { name: 'cc-plugin-agents-md', path: 'builtin', source: 'cc-plugin-agents-md@builtin', version: null },
+      { name: 'cc-plugin-telemetry', path: 'builtin', source: 'cc-plugin-telemetry@builtin', version: null },
+      { name: 'cc-plugin-plugin-authoring', path: 'builtin', source: 'cc-plugin-plugin-authoring@builtin', version: null },
+    ]);
+    // the init of the same process (seq 26's summary) lists the same plugins the same way
+    expect(status.plugins.map((p) => p.name)).toEqual((fixtureRow(26).plugins as { name: string }[]).map((p) => p.name));
+    expect(status.pluginErrors).toEqual([{ plugin: 'broken', type: 'manifest', message: 'bad json', path: '/p/broken' }]);
+    expect(status.pluginWarnings).toEqual([{ plugin: 'old', type: 'shadowed', message: 'shadowed by user' }]);
+  });
+
+  // W-D review m1: the answer carries no skills, and init's skills are among the commands (seq 9 against seq 4), so a
+  // skill the reload removed (seq 54 drops e8-probe's two commands) leaves the catalogue's skills too.
+  it('keeps only the init’s skills still among the reload answer’s commands', () => {
+    const tracker = new SessionStatusTracker(spec, () => {});
+    tracker.observe(fixtureRow(9), '2026-10-06T02:52:00.000Z');
+    const initSkills = fixtureRow(9).skills as string[];
+    expect(tracker.catalog().skills).toEqual(initSkills);
+    const reload = (seq: number) => tracker.applyReload(ReloadPluginsResponseSchema.parse((fixtureRow(seq).response as { response: unknown }).response));
+    reload(31); // the plugin still enabled: every skill stays
+    expect(tracker.catalog().skills).toEqual(initSkills);
+    reload(54);
+    expect(tracker.catalog().skills).toEqual(initSkills.filter((skill) => skill !== 'e8-probe:e8-hello'));
+  });
+});
+
+// P2-A start (2026-10-09; X17): `pluginsObservedAt` says when this launch's plugins were reported, so an empty list
+// before an init or a reload reads "not reported yet" (a no-prompt start sees no system/init: U1)
+describe('SessionStatusTracker.pluginsObservedAt', () => {
+  it('is null until a main-lane init or a reload reports the plugins; a subagent’s init does not count', () => {
+    const tracker = new SessionStatusTracker(spec, () => {});
+    expect(tracker.snapshot()).toMatchObject({ plugins: [], pluginsObservedAt: null });
+    tracker.observe({ type: 'system', subtype: 'init', parent_tool_use_id: 'toolu_1', plugins: [{ name: 'sub', path: '/s' }] }, '2026-10-09T10:00:00.000Z');
+    expect(tracker.snapshot().pluginsObservedAt).toBeNull();
+    tracker.observe({ type: 'system', subtype: 'init', plugins: [] }, '2026-10-09T10:00:01.000Z');
+    expect(tracker.snapshot()).toMatchObject({ plugins: [], pluginsObservedAt: '2026-10-09T10:00:01.000Z' });
+  });
+
+  it('a reload with no init before it sets it', () => {
+    const tracker = new SessionStatusTracker(spec, () => {});
+    tracker.applyReload(ReloadPluginsResponseSchema.parse((fixtureRow(31).response as { response: unknown }).response));
+    expect(tracker.snapshot().pluginsObservedAt).not.toBeNull();
+  });
+});
+// P2-A end

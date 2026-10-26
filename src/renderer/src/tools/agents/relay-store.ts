@@ -1,0 +1,290 @@
+// The relay store (C8b execution document, Interfaces *The relay*): the pending relays per `appSessionId:agentId`, one
+// per agent, in memory only (a reload loses the line and keeps the transcript rows, which are the record). `send` steers
+// the parent once with `priority: 'next'` through the agent-work client; the relay then moves through the observables
+// by watching that session's batches, the same wire input as the task graph, subscribed only while a relay of the
+// session is in flight or pending: `asked` → `forwarded` on the parent's SendMessage → `delivered` on a receipt, with
+// the O1 edges (the engine dropping the steer before starting it; the parent's exit) and the ended-child rules.
+import { create } from 'zustand';
+import { sendContentRefusal } from '@shared/engine/session-state-store';
+import type { SessionEvent } from '@shared/graph/events';
+import type { AgentId, AppSessionId } from '@shared/graph/ids';
+import { useTranscriptStore } from '../../stores/transcript';
+import { agentWorkClient } from './client';
+import { RELAY_COPY } from './copy';
+import { isPending, matchesReceipt, matchesSendMessage, parentRoundsBetween, relayText, type Relay } from './model/relay';
+import { sendMessageOutcome } from '@shared/engine/peer-envelope'; // E7
+import { isPeerPending, isPeerTarget, sendsToPeer, type AgentTarget, type PeerRelay, type PeerTarget } from './model/relay'; // E7
+
+export interface RelayStore {
+  relays: Map<string, Relay>; // key `appSessionId:agentId`; one relay per agent: a send is refused while it is `asked` (or its steer unanswered) and replaces a `forwarded` one
+  send(appSessionId: AppSessionId, agent: AgentTarget | PeerTarget /* E7 */, text: string, parentTurnOpen: boolean): Promise<void>;
+  dismiss(key: string): void;
+  peers: Map<string, PeerRelay>; // E7: key `appSessionId:peer:address`; one per address, by the agent relay's rules
+}
+
+export const relayKey = (appSessionId: AppSessionId, agentId: AgentId) => `${appSessionId}:${agentId}`;
+export const peerRelayKey = (appSessionId: AppSessionId, address: string) => `${appSessionId}:peer:${address}`; // E7
+
+const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const DROPPED = new Set(['cancelled', 'discarded', 'refused']);
+
+// When a frame says the agent's task ended (the relay's agent is its task).
+function endedAt(e: SessionEvent, agentId: AgentId): string | null {
+  if ((e.kind === 'subagent.finished' || e.kind === 'task.notification') && (e.taskId as string) === agentId) return e.at;
+  if (e.kind === 'task.updated' && (e.taskId as string) === agentId && ['completed', 'failed', 'killed', 'stopped'].includes(e.patch.status ?? '')) return e.at;
+  return null;
+}
+
+// Per session, while a relay of it is in flight or pending: the one batch subscription, the last parent seq seen (a new
+// relay's `sentSeq`), the parent's tool_use rounds (kept only while a relay is asked, to count its rounds), and what
+// arrived while a steer was unanswered (replayed onto the relay once the uuid is known).
+interface SessionWatch {
+  off: () => void;
+  lastSeq: number | null;
+  rounds: SessionEvent[];
+  inFlight: number;
+  buffered: SessionEvent[];
+}
+
+export function createRelayStore() {
+  const watches = new Map<AppSessionId, SessionWatch>();
+  const started = new Set<string>(); // steer uuids the engine reported started: a later cancellation is not a drop
+  const inFlight = new Set<string>(); // relay keys whose steer is unanswered
+  const followed = new Set<string>(); // relay keys whose child this store asked the host to follow (debt wave 4)
+
+  return create<RelayStore>()((set, get) => {
+    const put = (key: string, relay: Relay | null) => {
+      const relays = new Map(get().relays);
+      if (relay) relays.set(key, relay);
+      else relays.delete(key);
+      set({ relays });
+    };
+    const ofSession = (id: AppSessionId) => [...get().relays].filter(([, r]) => r.appSessionId === id);
+    const peersOf = (id: AppSessionId) => [...get().peers].filter(([, r]) => r.appSessionId === id); // E7
+
+    // Releases the child follow this store started, once its relay is delivered or ended. Not while the child's drill-in
+    // holds a transcript entry under the same key: the host keeps one follower per child, and a drill-in over an ended
+    // child reads that same follower (the entry outlives a detach, so this errs towards keeping the follower).
+    const release = (key: string, relay: Relay) => {
+      if (!followed.delete(key)) return;
+      if (useTranscriptStore.getState().entries[key] !== undefined) return;
+      agentWorkClient().unfollowAgent(relay.appSessionId, relay.agentId).catch(() => {});
+    };
+
+    // Drops what no relay of the session needs any more, and the subscription once none is in flight or pending.
+    const tidy = (id: AppSessionId) => {
+      const w = watches.get(id);
+      if (!w) return;
+      const relays = ofSession(id).map(([, r]) => r);
+      if (w.inFlight === 0) w.buffered = [];
+      if (w.inFlight === 0 && !relays.some((r) => r.state.kind === 'asked')) w.rounds = [];
+      if (w.inFlight > 0 || relays.some((r) => isPending(r.state))) return;
+      if (peersOf(id).some(([, r]) => isPeerPending(r.state))) return; // E7
+      w.off();
+      watches.delete(id);
+    };
+
+    // One event against one relay: the transitions of *The relay*.
+    const step = (key: string, e: SessionEvent) => {
+      const relay = get().relays.get(key);
+      if (!relay) return;
+      const w = watches.get(relay.appSessionId);
+      const { state } = relay;
+      if (!isPending(state)) return;
+      if (e.kind === 'process.exited' && e.agentId === null && e.seq !== null) {
+        release(key, relay);
+        return put(key, null); // the steer went with the process
+      }
+      const ended = endedAt(e, relay.agentId);
+      if (state.kind === 'asked') {
+        if (e.kind === 'command.lifecycle' && e.commandUuid === state.messageUuid) {
+          if (e.state === 'started') started.add(e.commandUuid);
+          else if (DROPPED.has(e.state) && !started.has(e.commandUuid)) put(key, { ...relay, state: { kind: 'failed', message: RELAY_COPY.dropped(e.state as 'cancelled' | 'discarded' | 'refused') } });
+          return;
+        }
+        if (ended !== null && state.childEndedAt === null) return put(key, { ...relay, state: { ...state, childEndedAt: ended } });
+        if (e.kind === 'tool.use' && e.seq !== null && matchesSendMessage(e, relay)) { // (b) is the live parent's row; the receipt below takes either form (O3)
+          const parentRounds = parentRoundsBetween(w?.rounds ?? [], state.sentSeq ?? -Infinity, e.seq + 1);
+          put(key, { ...relay, state: { kind: 'forwarded', messageUuid: state.messageUuid, sentAt: state.sentAt, toolUseId: e.toolUseId, forwardedAt: e.at, parentRounds, childEndedAt: state.childEndedAt } });
+          if (state.childEndedAt === null) followChild(key, relay);
+        }
+        return;
+      }
+      // A disk-form receipt counts only if written at or after this forward: the child's transcript may already hold the
+      // same text from an earlier relay or its own prompt (both clocks are this machine's, ISO strings in UTC).
+      if (matchesReceipt(e, relay) && !(e.seq === null && e.at < state.forwardedAt)) {
+        release(key, relay);
+        return put(key, { ...relay, state: { kind: 'delivered', deliveredAt: e.at } });
+      }
+      // A forwarded relay's agent ended: the rows in both transcripts are the record. Not for one forwarded to an agent
+      // that had already ended, which the forward resumes and whose resume start is the receipt.
+      if (ended !== null && state.childEndedAt === null) {
+        release(key, relay);
+        put(key, null);
+      }
+    };
+
+    // Debt wave 4: a live child's receipt reaches no wire on 2.1.283 (O3); it is the `queued_command` attachment its
+    // transcript gains at its next tool round, which C4 surfaces as the child's disk-form `user.message`. Nothing follows
+    // a live child's transcript otherwise (its drill-in reads the parent's stream), so a relay forwarded to a running
+    // child follows it: the answer carries what was written already, and the follower's later events arrive on the
+    // session's batches this store watches. The follow is released when the relay is delivered or its child ends.
+    // The answer applies only to the forward that asked for it (a later send replaces the relay under the same key), and
+    // only its receipts: the rest of the child's history is not news to the relay.
+    const followChild = (key: string, relay: Relay) => {
+      const forward = (r: Relay | undefined) => (r?.state.kind === 'forwarded' ? r.state.toolUseId : null);
+      const asked = forward(get().relays.get(key));
+      followed.add(key);
+      agentWorkClient()
+        .agentEvents(relay.appSessionId, relay.agentId)
+        .then((events) => {
+          if (asked === null || forward(get().relays.get(key)) !== asked) return;
+          for (const e of events) if (e.kind === 'user.message') step(key, e);
+          tidy(relay.appSessionId);
+        })
+        .catch(() => {
+          followed.delete(key); // not yet listed, or no meta: nothing follows it, and the relay rests at forwarded
+        });
+    };
+
+    const onBatch = (id: AppSessionId, events: SessionEvent[]) => {
+      const w = watches.get(id);
+      if (!w) return;
+      for (const e of events) {
+        if (e.agentId === null && e.seq !== null) w.lastSeq = w.lastSeq === null ? e.seq : Math.max(w.lastSeq, e.seq);
+        if (w.inFlight > 0) w.buffered.push(e);
+        if (e.kind === 'assistant.block.complete' && e.agentId === null && e.seq !== null && e.block.type === 'tool_use') w.rounds.push(e);
+        for (const [key] of ofSession(id)) step(key, e);
+        for (const [key] of peersOf(id)) stepPeer(key, e); // E7
+      }
+      tidy(id);
+    };
+
+    const subscribe = (id: AppSessionId): SessionWatch => {
+      let w = watches.get(id);
+      if (!w) {
+        const watch: SessionWatch = { off: () => {}, lastSeq: null, rounds: [], inFlight: 0, buffered: [] };
+        watch.off = agentWorkClient().onEventBatch(({ appSessionId, events }) => appSessionId === id && onBatch(id, events));
+        watches.set(id, (w = watch));
+      }
+      return w;
+    };
+
+    // E7 start: a relay to another session (E7 execution document, Design §4; Decision Log 6): asked → forwarded on the
+    // parent's SendMessage to the address carrying the owner's text → sent or failed on that call's result; failed when
+    // the engine drops the steer before starting it or the steer's own turn ends without that send; gone with the parent's process, as an agent relay is. No child to
+    // follow and no receipt: the other session's inbox is not this one's to watch. E11 W-D: a send to the address in
+    // the steer's own turn carrying other words (the session paraphrased) decides the turn's end instead: sent,
+    // reworded, when it went (so the text is not handed back for a second send), else failed in the send's words.
+    const putPeer = (key: string, relay: PeerRelay | null) => {
+      const peers = new Map(get().peers);
+      if (relay) peers.set(key, relay);
+      else peers.delete(key);
+      set({ peers });
+    };
+    const stepPeer = (key: string, e: SessionEvent) => {
+      const relay = get().peers.get(key);
+      if (!relay || !isPeerPending(relay.state)) return;
+      const { state } = relay;
+      if (e.kind === 'process.exited' && e.agentId === null && e.seq !== null) return putPeer(key, null);
+      if (state.kind === 'asked') {
+        if (e.kind === 'command.lifecycle' && e.commandUuid === state.messageUuid) {
+          if (e.state === 'started') started.add(e.commandUuid);
+          else if (DROPPED.has(e.state) && !started.has(e.commandUuid)) putPeer(key, { ...relay, state: { kind: 'failed', message: RELAY_COPY.dropped(e.state as 'cancelled' | 'discarded' | 'refused') } });
+          // The steer's own turn ended and no SendMessage carried the text (the engine names that turn by the steer's
+          // uuid, pass3/steer-next seq 238-239; e7-peer-a seq 216 follows the reply's send): nothing will send it now,
+          // unless the turn sent it to the address in its own words.
+          else if (e.state === 'completed') {
+            const outcome = state.reworded?.outcome ?? null;
+            putPeer(key, { ...relay, state: outcome === null ? { kind: 'failed', message: RELAY_COPY.notSent } : outcome.ok ? { kind: 'sent', sentAt: outcome.at, reworded: true } : { kind: 'failed', message: outcome.message } });
+          }
+          return;
+        }
+        if (e.kind === 'tool.use' && e.seq !== null && matchesSendMessage(e, relay.target, relay.text)) {
+          putPeer(key, { ...relay, state: { kind: 'forwarded', messageUuid: state.messageUuid, sentAt: state.sentAt, toolUseId: e.toolUseId, forwardedAt: e.at } });
+        } else if (e.seq !== null && started.has(state.messageUuid) && sendsToPeer(e, relay.target)) {
+          putPeer(key, { ...relay, state: { ...state, reworded: { toolUseId: e.toolUseId, outcome: null } } }); // the steer's turn, other words
+        } else if (e.kind === 'tool.result' && e.agentId === null && state.reworded?.toolUseId === e.toolUseId) {
+          const outcome = sendMessageOutcome(e);
+          putPeer(key, { ...relay, state: { ...state, reworded: { toolUseId: e.toolUseId, outcome: outcome.ok ? { ok: true, at: e.at } : { ok: false, message: outcome.message } } } });
+        }
+        return;
+      }
+      if (state.kind === 'forwarded' && e.kind === 'tool.result' && e.agentId === null && e.toolUseId === state.toolUseId) {
+        const outcome = sendMessageOutcome(e);
+        putPeer(key, { ...relay, state: outcome.ok ? { kind: 'sent', sentAt: e.at } : { kind: 'failed', message: outcome.message } });
+      }
+    };
+    const sendPeer = async (appSessionId: AppSessionId, target: PeerTarget, text: string, parentTurnOpen: boolean) => {
+      const key = peerRelayKey(appSessionId, target.address);
+      if (inFlight.has(key) || get().peers.get(key)?.state.kind === 'asked') return; // a second would race the first
+      const base = { appSessionId, target, text };
+      const content = relayText(target, text);
+      const refusal = sendContentRefusal(content);
+      if (refusal) return putPeer(key, { ...base, state: { kind: 'failed', message: refusal.message } });
+      const w = subscribe(appSessionId);
+      w.inFlight += 1;
+      inFlight.add(key);
+      try {
+        const { messageUuid } = await agentWorkClient().steer(appSessionId, content, 'next');
+        putPeer(key, { ...base, state: { kind: 'asked', messageUuid, sentAt: new Date().toISOString(), parentTurnOpenAtSend: parentTurnOpen } });
+        for (const e of w.buffered) stepPeer(key, e);
+      } catch (error) {
+        putPeer(key, { ...base, state: { kind: 'failed', message: messageOf(error) } });
+      } finally {
+        w.inFlight -= 1;
+        inFlight.delete(key);
+        tidy(appSessionId);
+      }
+    };
+    // E7 end
+
+    return {
+      relays: new Map(),
+      peers: new Map(), // E7
+
+      async send(appSessionId, agent, text, parentTurnOpen) {
+        if (isPeerTarget(agent)) return sendPeer(appSessionId, agent, text, parentTurnOpen); // E7
+        const key = relayKey(appSessionId, agent.agentId);
+        const existing = get().relays.get(key);
+        // Only an unforwarded steer blocks (controller, M2 review): a second would race it. A `forwarded` relay rests there
+        // for the child's whole run on 2.1.283 (O3), so a new send replaces it.
+        if (inFlight.has(key) || existing?.state.kind === 'asked') return;
+        const base = { appSessionId, agentId: agent.agentId, name: agent.name, text };
+        const content = relayText(agent, text);
+        const refusal = sendContentRefusal(content);
+        if (refusal) return put(key, { ...base, state: { kind: 'failed', message: refusal.message } });
+        const w = subscribe(appSessionId); // before the steer goes out, so nothing it causes is missed
+        const sentSeq = w.lastSeq;
+        w.inFlight += 1;
+        inFlight.add(key);
+        try {
+          const { messageUuid } = await agentWorkClient().steer(appSessionId, content, 'next');
+          put(key, { ...base, state: { kind: 'asked', messageUuid, sentAt: new Date().toISOString(), sentSeq, parentTurnOpenAtSend: parentTurnOpen, childEndedAt: null } });
+          for (const e of w.buffered) step(key, e);
+        } catch (error) {
+          put(key, { ...base, state: { kind: 'failed', message: messageOf(error) } });
+        } finally {
+          w.inFlight -= 1;
+          inFlight.delete(key);
+          tidy(appSessionId);
+        }
+      },
+
+      dismiss(key) {
+        const peer = get().peers.get(key); // E7
+        if (peer) {
+          putPeer(key, null);
+          return tidy(peer.appSessionId);
+        }
+        const relay = get().relays.get(key);
+        if (!relay) return;
+        release(key, relay);
+        put(key, null);
+        tidy(relay.appSessionId);
+      },
+    };
+  });
+}
+
+export const useRelays = createRelayStore();

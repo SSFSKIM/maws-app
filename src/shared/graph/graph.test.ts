@@ -1,0 +1,326 @@
+import { describe, expect, it } from 'vitest';
+import * as z from 'zod';
+import { AttentionItemSchema, type AttentionItem } from './attention';
+import {
+  ATTENTION_KINDS,
+  ATTENTION_STATES,
+  AUTO_MODE_REFUSAL_CODES,
+  COMMAND_LIFECYCLE_STATES,
+  DENIAL_KINDS,
+  PERMISSION_MODES,
+  PLAN_OUTCOMES,
+  SAFEGUARD_VERDICTS,
+  SESSION_STATES,
+  TITLE_SOURCES,
+} from './enums';
+import { EVENT_KINDS, QUEUE_TRANSITION_ACTIONS /* P2-C */, SessionEventSchema, type SessionEvent } from './events';
+import { SessionRecordSchema, type SessionRecord } from './session';
+
+const base = {
+  id: 'e1',
+  sessionId: 's1',
+  at: '2026-09-28T10:00:00.000Z',
+  seq: 12,
+  agentId: null,
+  parentToolUseId: null,
+};
+
+const toolResult = (overrides: Record<string, unknown>) => ({
+  ...base,
+  kind: 'tool.result',
+  toolUseId: 'toolu_1',
+  content: 'ok',
+  isError: false,
+  structured: null,
+  spillPath: null,
+  denial: null,
+  safeguard: 'not_evaluated',
+  messageUuid: null,
+  ...overrides,
+});
+
+const record = (): SessionRecord =>
+  SessionRecordSchema.parse({
+    appId: 'app-1',
+    engineSessionId: 's1',
+    projectId: null,
+    directory: '/Users/new/Developer/GitHub/MAWS',
+    additionalDirectories: [],
+    worktree: null,
+    branch: 'main',
+    title: { text: 'Untitled', source: 'none' },
+    pinned: false,
+    archived: false,
+    holder: { kind: 'self' },
+    lastSeen: { messageUuid: null, at: null },
+    unread: false,
+    engineVersion: '2.1.283',
+    gateway: { routed: false, baseUrl: null, autoModeServer: 'unknown' }, // C3: the X1 gateway extension
+    model: { requested: null, resolved: 'claude-sonnet-5' },
+    effort: null,
+    permissionMode: { requested: 'default', effective: 'default', refusal: null },
+    lineage: null, // E3 (X11)
+    createdAt: '2026-09-28T10:00:00.000Z',
+    updatedAt: '2026-09-28T10:00:00.000Z',
+  });
+
+describe('graph schemas accept and reject', () => {
+  describe('enums', () => {
+    it('carry the X1 values verbatim', () => {
+      expect(PERMISSION_MODES).toEqual(['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions', 'dontAsk']);
+      expect(AUTO_MODE_REFUSAL_CODES).toEqual(['auto_mode_settings', 'auto_mode_circuit_breaker', 'auto_mode_fast_mode', 'auto_mode_model', 'auto_mode_unavailable']);
+      expect(DENIAL_KINDS).toEqual(['user-rejected', 'permission-rule', 'automode-blocked', 'automode-unavailable', 'automode-parsing-error', 'interrupted', 'cancelled']);
+      expect(ATTENTION_KINDS).toEqual(['permission', 'question', 'plan', 'dialog', 'elicitation', 'error', 'interrupted', 'held_peer_message', 'auto_mode_unavailable', 'async_input', 'essential_unread' /* P2-C */]);
+      expect(ATTENTION_STATES).toEqual(['pending', 'delivered', 'confirmed', 'retired']);
+      expect(SAFEGUARD_VERDICTS).toEqual(['not_evaluated', 'skipped', 'not_flagged', 'flagged']);
+      expect(TITLE_SOURCES).toEqual(['user', 'generated', 'tool', 'none']);
+      expect(SESSION_STATES).toEqual(['idle', 'running', 'requires_action']);
+      expect(COMMAND_LIFECYCLE_STATES).toEqual(['queued', 'started', 'completed', 'cancelled', 'discarded', 'refused']);
+      expect(PLAN_OUTCOMES).toEqual(['implement', 'clear_and_implement', 'keep_planning']);
+    });
+
+    it('lists every event kind once and the union covers each', () => {
+      expect(new Set(EVENT_KINDS).size).toBe(EVENT_KINDS.length);
+      expect(EVENT_KINDS).toHaveLength(70); // R1: the five plugin.* kinds; R2: the surface's four; E1: the five maws.* kinds; E3: the two side.thread.* kinds; E7: peer.message; E2: maws.delivery.artifact; E4c: maws.browser.action; P2-C: queue.transition; l2-transcript-01: tool.summary
+      expect(EVENT_KINDS.at(-4)).toBe('peer.message'); // E7: appended after E1's block (X1 is append-only)
+      expect(EVENT_KINDS.at(-3)).toBe('maws.delivery.artifact'); // E2: appended after E7's (landing order)
+      expect(EVENT_KINDS.at(-2)).toBe('maws.browser.action'); // E4c: after E2's, in ledger order
+      expect(EVENT_KINDS.at(-1)).toBe('queue.transition'); // P2-C (2026-10-09): after E4c's
+      const covered = SessionEventSchema.options.map((option) => option.shape.kind.value).sort();
+      expect(covered).toEqual([...EVENT_KINDS].sort());
+    });
+  });
+
+  describe('events', () => {
+    it('accepts a tool.result with every denial kind and rejects an invented one', () => {
+      for (const denial of DENIAL_KINDS) expect(SessionEventSchema.safeParse(toolResult({ denial })).success, denial).toBe(true);
+      expect(SessionEventSchema.safeParse(toolResult({ denial: 'because' })).success).toBe(false);
+    });
+
+    it('accepts a tool.result with every safeguard verdict and rejects an invented one', () => {
+      for (const safeguard of SAFEGUARD_VERDICTS) expect(SessionEventSchema.safeParse(toolResult({ safeguard })).success, safeguard).toBe(true);
+      expect(SessionEventSchema.safeParse(toolResult({ safeguard: 'approved' })).success).toBe(false);
+    });
+
+    it('is strict: an unknown field on the app record is rejected, a missing base field too', () => {
+      expect(SessionEventSchema.safeParse(toolResult({ extra: 1 })).success).toBe(false);
+      const { seq: _seq, ...withoutSeq } = toolResult({});
+      void _seq;
+      expect(SessionEventSchema.safeParse(withoutSeq).success).toBe(false);
+      expect(SessionEventSchema.safeParse({ ...toolResult({}), seq: null }).success).toBe(true);
+    });
+
+    it('accepts session.reconnect phases and rejects an unknown phase', () => {
+      const reconnect = { ...base, kind: 'session.reconnect', phase: 'attempting', attempt: 1, maxAttempts: 3, trigger: 'process_exit', reason: null };
+      expect(SessionEventSchema.parse(reconnect)).toEqual(reconnect);
+      expect(SessionEventSchema.safeParse({ ...reconnect, phase: 'retrying' }).success).toBe(false);
+      expect(SessionEventSchema.safeParse({ ...reconnect, trigger: 'boredom' }).success).toBe(false);
+    });
+
+    it('accepts one event per kind through a representative payload', () => {
+      const samples: Record<string, Record<string, unknown>> = {
+        'session.started': { cwd: '/tmp', engineVersion: null, resumedFrom: null, forked: false },
+        'session.init': { cwd: '/tmp', model: 'm', permissionMode: 'auto', tools: ['Bash'], slashCommands: [], agents: [], skills: [], plugins: [{ name: 'p', source: 's' }], mcpServers: [], capabilities: [], engineVersion: '2.1.283', outputStyle: null },
+        'session.state': { state: 'requires_action' },
+        'session.commands': { commands: [{ name: 'compact', description: 'd', argumentHint: null, builtin: true }] },
+        'turn.started': { userMessageUuid: 'u', origin: 'human' },
+        'turn.ended': { result: 'success', isError: false, terminalReason: 'completed', resultText: 'OK', durationMs: 10, numTurns: 1, costUsd: 0.01, usage: { inputTokens: 1, outputTokens: 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, thinkingTokens: null }, permissionDenials: [{ toolName: 'Bash', toolUseId: 't', toolInput: {} }], errors: [], userMessageUuids: ['u'], origin: 'human', resultIndex: 0, isEchoReceipt: false },
+        'command.lifecycle': { commandUuid: 'c', state: 'queued' },
+        'assistant.block.delta': { apiMessageId: 'msg_1', blockIndex: 0, blockType: 'text', textDelta: 'hi', thinkingDelta: null, inputJsonDelta: null, userMessageUuid: null },
+        'assistant.block.complete': { messageUuid: 'm', apiMessageId: 'msg_1', blockIndex: 0, block: { type: 'text', text: 'hi' }, model: 'm', supersedes: [], aborted: false, userMessageUuids: [] },
+        'user.message': { messageUuid: 'u', content: 'hi', isReplay: true, isSynthetic: false, origin: 'human', bash: { part: 'output', stdout: 'x', stderr: '', exitCode: 0 } },
+        'tool.use': { toolUseId: 't', toolName: 'Bash', input: { command: 'ls' }, apiMessageId: null, messageUuid: null },
+        'tool.safeguard': { toolUseId: 't', verdict: 'not_flagged', lane: 'server' },
+        'tool.result': { toolUseId: 't', content: [{ type: 'text', text: 'x' }], isError: false, structured: null, spillPath: null, denial: 'user-rejected', safeguard: 'not_flagged', messageUuid: null },
+        'tool.progress': { toolUseId: 't', toolName: 'Task', elapsedSeconds: 3, taskId: 'task', heartbeat: false },
+        'tool.summary': { toolUseIds: ['t'], summary: 'Checked project state' },
+        'hook.started': { hookId: 'h', hookName: 'n', hookEvent: 'PreToolUse' },
+        'hook.finished': { hookId: 'h', hookName: 'n', hookEvent: 'PreToolUse', outcome: 'success', exitCode: 0, stdout: '', stderr: '' },
+        'hook.callback_requested': { requestId: 'r', callbackId: 'cb', hookEvent: 'PreToolUse', toolUseId: 't', input: {} },
+        'hook.callback_resolved': { requestId: 'r', callbackId: 'cb', response: {} },
+        'permission.requested': { requestId: 'r', toolUseId: 't', toolName: 'Bash', displayName: null, input: {}, description: null, decisionReasonType: null, suggestions: [], blockedPath: null },
+        'permission.resolved': { requestId: 'r', toolUseId: 't', behavior: 'allow', message: null, updatedInput: null, updatedPermissions: [], resolvedBy: 'user' },
+        'question.requested': { requestId: 'r', toolUseId: 't', questions: [{ question: 'q', header: 'h', options: [{ label: 'a', description: null, preview: null }], multiSelect: false }] },
+        'question.answered': { requestId: 'r', toolUseId: 't', answers: { q: 'a' } },
+        'plan.requested': { requestId: 'r', toolUseId: 't', plan: '# plan', input: {} },
+        'plan.resolved': { requestId: 'r', toolUseId: 't', outcome: 'implement', feedback: null },
+        'dialog.requested': { requestId: 'r', dialogKind: 'sandbox', payload: {}, toolUseId: null },
+        'dialog.resolved': { requestId: 'r', behavior: 'completed', result: {} },
+        'elicitation.requested': { requestId: 'r', mcpServerName: 'srv', elicitationId: null, mode: 'form', payload: {} },
+        'elicitation.resolved': { requestId: 'r', action: 'accept', content: {} },
+        'subagent.started': { taskId: 'task', toolUseId: 't', description: 'd', subagentType: null, isBackground: false, spawnDepth: 1, prompt: null },
+        'subagent.progress': { taskId: 'task', description: 'd', usage: { totalTokens: 1, toolUses: 1, durationMs: 1 }, lastToolName: null, summary: null },
+        'subagent.finished': { taskId: 'task', status: 'completed', summary: null, outputFile: null, reason: null },
+        'subagent.message': { direction: 'to_child', fromAgentId: null, toAgentId: 'agent', text: 'hi' },
+        'task.started': { taskId: 'task', toolUseId: null, taskType: 'local_agent', description: 'd', isBackground: true, workflowName: null },
+        'task.updated': { taskId: 'task', patch: { status: 'completed', endTime: 1 } },
+        'task.notification': { taskId: 'task', toolUseId: null, status: 'completed', summary: 's', outputFile: null, reason: null },
+        'tasks.snapshot': { tasks: [{ taskId: 'task', taskType: 'local_agent', description: 'd', ambient: false }] },
+        'workflow.progress': { taskId: 'task', workflowName: 'wf', progress: { phase: 1 } },
+        'boundary.compaction': { trigger: 'auto', preTokens: 100, postTokens: 10, logicalParentUuid: null, historical: false },
+        'boundary.reset': { newConversationId: 'c2', trigger: null },
+        'boundary.retraction': { retractedMessageUuids: ['m'], reason: 'refusal', fallbackModel: null },
+        'boundary.rewind': { targetMessageUuid: 'm', precedingAssistantUuid: null, prefillText: null },
+        'usage.sample': { costUsd: 0.1, usage: { inputTokens: 1, outputTokens: 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, thinkingTokens: 0 }, modelUsage: {}, source: 'result' },
+        'context.sample': { totalTokens: 1, maxTokens: 2, percentage: 50, autoCompactThreshold: null, isAutoCompactEnabled: true, model: 'm' },
+        'error.raised': { scope: 'turn', message: 'boom', code: null, toolUseId: null, taskId: null, requestId: null },
+        'api.retry': { attempt: 1, maxRetries: 3, retryDelayMs: 500, errorStatus: 529, error: 'overloaded' },
+        'session.reconnect': { phase: 'reconnected', attempt: 2, maxAttempts: null, trigger: 'host_restart', reason: null },
+        'notice.posted': { level: 'info', text: 'hi', key: null },
+        'process.exited': { code: 0, signal: null, reason: 'quit', lostAttentionCount: 0, budget: null /* C12 */ },
+        'plugin.toast': { plugin: 'mods-probe', text: 'hi', timeoutMs: 4000 }, // R1
+        'plugin.status': { plugin: 'mods-probe', text: '' },
+        'plugin.log': { plugin: 'mods-probe', text: 'line' },
+        'plugin.invalidate': { event: 'ui.render' },
+        'plugin.load_issue': { plugin: 'p@market', level: 'warning', message: 'shadowed folder' },
+        'plugin.panes': { panes: [{ id: 'mods-probe-pane', title: 'Probe pane', plugin: 'mods-probe', closeOnEscape: false, holdToasts: false, rows: null, columns: null }], shownId: 'mods-probe-pane', focusedId: null, focusRequestedId: null }, // R2
+        'plugin.scroll': { component: 'Pane', instanceId: 'mods-probe-pane', offset: 16, followEnd: true },
+        'plugin.focus': { component: 'Pane', instanceId: 'mods-probe-pane', plugin: 'mods-probe', key: 'pick' },
+        'plugin.ask': { requestId: 'r-1', ask: 'prompt_fill', plugin: null, text: 'MODS_PROBE_FILL', mode: 'replace' },
+        'frame.unknown': { frameType: 'wibble', subtype: null },
+        // E1 start: the maws tool server's calls (X9)
+        'maws.ask.opened': { askId: 'toolu_1', toolUseId: 'toolu_1', requestId: 'r', blocking: true, title: null, context: null, questions: [{ id: 'q1', question: 'Which colour?', modality: 'choice', options: [{ label: 'Red' }] }] },
+        'maws.ask.answered': { askId: 'toolu_1', toolUseId: 'toolu_1', answers: [{ id: 'q1', question: 'Which colour?', status: 'answered', value: ['Red'] }], delivery: 'result' },
+        'maws.ask.cancelled': { askId: 'toolu_1', toolUseId: null, reason: 'exit' },
+        'maws.delivery.file': { toolUseId: 'toolu_2', requestId: 'r', deliverables: [{ id: 'd1', path: '/r/hello.txt', name: 'hello.txt' }], caption: 'the greeting', urgency: 'normal' },
+        'maws.pane.shown': { toolUseId: 'toolu_3', requestId: 'r', pane: 'terminal', target: null, opened: { kind: 'panel-tool', toolId: 'terminal', tabId: 'terminal:1', title: 'Terminal' }, error: null },
+        // E1 end
+        // E3 start
+        'side.thread.opened': { childAppSessionId: 'app-child', childEngineSessionId: null, anchor: { kind: 'file-line', locator: '/r/a.ts#L3', label: 'a.ts:3', path: '/r/a.ts', line: 3 }, openedBy: 'comment' },
+        'side.thread.summarised': { childAppSessionId: 'app-child', text: 'Done.', isError: false, turns: 1 },
+        // E3 end
+        // E7 start: a message from another session (SPEC 38 §38.23)
+        'peer.message': {
+          messageUuid: 'u-peer', from: 'uds:/tmp/cc-socks/10562.sock', fromSession: null, fromName: 'repo-b', fromMode: 'prompting', fromPlugin: null,
+          hopChain: ['b4a75fd9e01cdb83eea3f9ee'], text: 'hello from B', midTurn: false, lineage: 'peer', replyable: true,
+        },
+        // E7 end
+        // E2 start: an artifact version (X9 artifact_create, artifact_update)
+        'maws.delivery.artifact': { toolUseId: 'toolu_4', requestId: 'r', action: 'update', artifactId: 'dash', deliverableId: '6f1c2d3e-4b5a-4c6d-8e9f-0a1b2c3d4e5f', version: 2, title: 'Dashboard' },
+        // E2 end
+        // E4c start: one browser tool call (X9 browser_*), mapped from its answer
+        'maws.browser.action': {
+          toolUseId: 'toolu_5', requestId: 'r', tool: 'browser_act', action: 'click', tabId: 'b_000000000001', target: 'e12', url: 'http://127.0.0.1:17391/done.html', title: 'Thanks',
+          ms: 40, deliverableId: null, error: null, waitedFor: 'human', waitedMs: 3012,
+        },
+        // E4c end
+        // P2-C start (2026-10-09): a drop row of the host queue's prompt record
+        'queue.transition': { action: 'drop', queueId: 'q-1', messageUuid: 'u-1', reason: 'cancelled' },
+        // P2-C end
+      };
+      expect(Object.keys(samples).sort()).toEqual([...EVENT_KINDS].sort());
+      for (const [kind, payload] of Object.entries(samples)) {
+        const event = { ...base, kind, ...payload };
+        const result = SessionEventSchema.safeParse(event);
+        expect(result.success, `${kind}: ${result.success ? '' : z.prettifyError(result.error)}`).toBe(true);
+        if (result.success) expect(result.data).toEqual(event);
+      }
+    });
+
+    // E4c start: the browser action's tool is one of the six, its waits one of two reasons
+    it('maws.browser.action names one of the six browser tools and nothing else', () => {
+      const action = { ...base, kind: 'maws.browser.action', toolUseId: null, requestId: 'r', tool: 'browser_screenshot', action: 'screenshot', tabId: 'b_000000000001', target: 'page', url: null, title: null, ms: null, deliverableId: '6f1c2d3e-4b5a-4c6d-8e9f-0a1b2c3d4e5f', error: null, waitedFor: null, waitedMs: null };
+      expect(SessionEventSchema.safeParse(action).success).toBe(true);
+      expect(SessionEventSchema.safeParse({ ...action, tool: 'artifact_screenshot' }).success).toBe(false);
+      expect(SessionEventSchema.safeParse({ ...action, waitedFor: 'sheet' }).success).toBe(false);
+      expect(SessionEventSchema.safeParse({ ...action, error: undefined }).success).toBe(false); // required, nullable
+    });
+    // E4c end
+    // P2-C start (2026-10-09): a transition names one of the twelve actions, and a drop's reason one of the three drops
+    it('queue.transition takes the twelve actions of the prompt record, nullable ids, and a drop reason or null', () => {
+      const transition = { ...base, kind: 'queue.transition', action: 'withdraw', queueId: null, messageUuid: 'u-1', reason: null };
+      for (const action of QUEUE_TRANSITION_ACTIONS) expect(SessionEventSchema.safeParse({ ...transition, action }).success, action).toBe(true);
+      expect(SessionEventSchema.safeParse({ ...transition, action: 'pause' }).success).toBe(false); // a pause is not a prompt's transition
+      expect(SessionEventSchema.safeParse({ ...transition, reason: 'completed' }).success).toBe(false);
+      expect(SessionEventSchema.safeParse({ ...transition, queueId: undefined }).success).toBe(false); // required, nullable
+    });
+    // P2-C end
+
+    it('rejects an unknown kind and wrong-typed payload fields', () => {
+      expect(SessionEventSchema.safeParse({ ...base, kind: 'tool.exploded' }).success).toBe(false);
+      expect(SessionEventSchema.safeParse({ ...base, kind: 'turn.started', userMessageUuid: 5, origin: null }).success).toBe(false);
+      expect(SessionEventSchema.safeParse({ ...base, kind: 'user.message', messageUuid: null, content: 'x', isReplay: false, isSynthetic: false, origin: null, bash: { part: 'input' } }).success).toBe(false);
+      expect(SessionEventSchema.safeParse({ ...base, kind: 'process.exited', code: null, signal: null, reason: 'meteor', lostAttentionCount: 0 }).success).toBe(false);
+    });
+
+    it('brands the identifiers on parse', () => {
+      const event: SessionEvent = SessionEventSchema.parse(toolResult({}));
+      expect(event.sessionId).toBe('s1');
+      expect(SessionEventSchema.safeParse(toolResult({ toolUseId: '' })).success).toBe(false);
+    });
+  });
+
+  describe('session record', () => {
+    it('accepts a well-formed record', () => {
+      expect(record().permissionMode).toEqual({ requested: 'default', effective: 'default', refusal: null });
+    });
+
+    it('rejects a silent downgrade and accepts the same downgrade with its refusal code', () => {
+      const downgraded = { ...record(), permissionMode: { requested: 'auto', effective: 'default', refusal: null } };
+      const result = SessionRecordSchema.safeParse(downgraded);
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error.issues.map((i) => i.path.join('.'))).toContain('permissionMode.refusal');
+      expect(SessionRecordSchema.safeParse({ ...downgraded, permissionMode: { requested: 'auto', effective: 'default', refusal: 'auto_mode_model' } }).success).toBe(true);
+    });
+
+    it('rejects a refusal that did not happen and accepts the honoured request', () => {
+      expect(SessionRecordSchema.safeParse({ ...record(), permissionMode: { requested: 'auto', effective: 'auto', refusal: 'auto_mode_model' } }).success).toBe(false);
+      expect(SessionRecordSchema.safeParse({ ...record(), permissionMode: { requested: 'auto', effective: 'auto', refusal: null } }).success).toBe(true);
+    });
+
+    // E3 (X11): a side thread's lineage carries its anchor; a fork's carries none; a root's is null and never absent
+    it('carries lineage: null for a root, a side thread with its anchor, a fork without one', () => {
+      const anchor = { kind: 'file-line', locator: '/r/a.ts#L3', label: 'a.ts:3', path: '/r/a.ts', line: 3 };
+      const sideThread = { kind: 'side-thread', parentAppSessionId: 'app-parent', parentEngineSessionId: 's0', anchor, openedBy: 'comment' };
+      expect(SessionRecordSchema.parse({ ...record(), lineage: sideThread }).lineage).toEqual(sideThread);
+      expect(SessionRecordSchema.safeParse({ ...record(), lineage: { kind: 'fork', parentAppSessionId: 'app-parent', parentEngineSessionId: null, openedBy: 'fork' } }).success).toBe(true);
+      const withoutLineage: Record<string, unknown> = { ...record() };
+      delete withoutLineage.lineage;
+      expect(SessionRecordSchema.safeParse(withoutLineage).success).toBe(false);
+      expect(SessionRecordSchema.safeParse({ ...record(), lineage: { ...sideThread, kind: 'branch' } }).success).toBe(false);
+      expect(SessionRecordSchema.safeParse({ ...record(), lineage: { ...sideThread, openedBy: 'menu' } }).success).toBe(false);
+      expect(SessionRecordSchema.safeParse({ ...record(), lineage: { ...sideThread, source: 'disk' } }).success).toBe(false); // lineage_source is index-only
+    });
+
+    it('rejects an unknown refusal code, an unknown mode and an unknown holder', () => {
+      expect(SessionRecordSchema.safeParse({ ...record(), permissionMode: { requested: 'auto', effective: 'default', refusal: 'auto_mode_weather' } }).success).toBe(false);
+      expect(SessionRecordSchema.safeParse({ ...record(), permissionMode: { requested: 'yolo', effective: 'yolo', refusal: null } }).success).toBe(false);
+      expect(SessionRecordSchema.safeParse({ ...record(), holder: { kind: 'ghost' } }).success).toBe(false);
+      expect(SessionRecordSchema.safeParse({ ...record(), holder: { kind: 'terminal', pid: 42 } }).success).toBe(true);
+      expect(SessionRecordSchema.safeParse({ ...record(), holder: { kind: 'background_job', pid: null, jobId: 'j' } }).success).toBe(true);
+      expect(SessionRecordSchema.safeParse({ ...record(), title: { text: 't', source: 'oracle' } }).success).toBe(false);
+      expect(SessionRecordSchema.safeParse({ ...record(), extra: true }).success).toBe(false);
+    });
+  });
+
+  describe('attention item', () => {
+    const item = (overrides: Record<string, unknown> = {}): unknown => ({
+      id: 'att-1',
+      appSessionId: 'app-1',
+      sessionId: 's1',
+      kind: 'permission',
+      request: { requestId: 'r', toolUseId: 't', taskId: null, agentId: null },
+      summary: 'Bash wants to run ls',
+      createdAt: '2026-09-28T10:00:00.000Z',
+      state: 'pending',
+      stateChangedAt: '2026-09-28T10:00:00.000Z',
+      expiresAt: null,
+      ...overrides,
+    });
+
+    it('accepts every kind including auto_mode_unavailable, and every state', () => {
+      for (const kind of ATTENTION_KINDS) expect(AttentionItemSchema.safeParse(item({ kind })).success, kind).toBe(true);
+      const parsed: AttentionItem = AttentionItemSchema.parse(item({ kind: 'auto_mode_unavailable', request: { requestId: null, toolUseId: null, taskId: null, agentId: null } }));
+      expect(parsed.kind).toBe('auto_mode_unavailable');
+      for (const state of ATTENTION_STATES) expect(AttentionItemSchema.safeParse(item({ state })).success, state).toBe(true);
+      expect(AttentionItemSchema.safeParse(item({ kind: 'held_peer_message', expiresAt: '2026-09-28T11:00:00.000Z' })).success).toBe(true);
+    });
+
+    it('rejects an unknown kind, an unknown state and a stray field', () => {
+      expect(AttentionItemSchema.safeParse(item({ kind: 'nudge' })).success).toBe(false);
+      expect(AttentionItemSchema.safeParse(item({ state: 'snoozed' })).success).toBe(false);
+      expect(AttentionItemSchema.safeParse(item({ extra: 1 })).success).toBe(false);
+      expect(AttentionItemSchema.safeParse(item({ request: { requestId: 'r' } })).success).toBe(false);
+    });
+  });
+});

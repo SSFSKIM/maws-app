@@ -1,0 +1,133 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "skipLibCheck": false,
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"]
+  },
+  "include": [
+    "playwright.config.ts",
+    "playwright.dashboard.config.ts", // P3-E (E2 M6): the dashboard acceptance invocation's own config
+    "e2e/**/*",
+    "src/renderer/src/env.d.ts",
+    "src/shared/**/*",
+    // What the specs import outside e2e/ and src/shared/, directly or through what they import (P2-F W-T, the tracker's
+    // C1 e2e-tsconfig row): an editor builds this project composite through tsconfig.json's references, and composite
+    // mode refuses a file the include does not list (TS6307). `pnpm typecheck` runs it composite too, so a spec that
+    // imports a new file outside these lists fails there until the file is added here.
+    // P3-D (M7): the design-system live run validates the mirrored token file and law with the kind's own checks
+    "src/artifacts/design-system/color.ts",
+    "src/artifacts/design-system/extensions.ts",
+    "src/artifacts/design-system/law.ts",
+    "src/artifacts/design-system/resolve.ts",
+    "src/artifacts/design-system/roles.ts",
+    "src/artifacts/design-system/tokens.ts",
+    "src/artifacts/design-system/values.ts",
+    // P3-C (M4): the presentations spec seeds S6's 100-slide bench deck
+    "src/artifacts/slides/fixtures/bench.ts",
+    "src/artifacts/slides/fixtures/s6.ts",
+    // P3-E1 (M6): the design scale gate seeds the 24-board bench design
+    "src/artifacts/design/fixtures/bench.ts",
+    // P3-C at the merge of B: B's `src/artifacts/yjs/*.ts` takes in C's seams (slides.ts, slide-text.ts, slides-undo.ts),
+    // whose seam imports the dialect's IR
+    "src/artifacts/slides/ir.ts",
+    "src/engine-host/binary-info.ts",
+    // P4-AGG M1: the Discover launch names the catalog's two test seams by their modules' constants
+    "src/main/catalog/fetch.ts",
+    "src/main/catalog/sources.ts",
+    // P3-H: the connector runs drive a scratch engine through the host's control client and route E's call
+    "src/engine-host/controls.ts",
+    // P3-HD: the direct-route probe observes real reports through route D's cache and compares H's fingerprint
+    "src/engine-host/connectors/local-key.ts",
+    // P3-HD M2: the transport scenes drive MAWS's own connections
+    "src/engine-host/connectors/direct-client.ts",
+    "src/engine-host/connectors/direct-http.ts",
+    "src/engine-host/connectors/direct-stdio.ts",
+    "src/engine-host/connectors/direct-wire.ts",
+    "src/engine-host/connectors/provenance.ts",
+    "src/engine-host/connectors/source-entry.ts",
+    "src/engine-host/connectors/status.ts",
+    "src/engine-host/mcp-call.ts",
+    // P4 W2-D: the widgets spec's Stop case bounds its wait by the plugin runner's own SIGKILL grace
+    "src/engine-host/plugins/cli-result.ts",
+    "src/engine-host/plugins/reload-after.ts",
+    "src/engine-host/plugins/runner.ts",
+    "src/engine-host/outbound-writer.ts",
+    "src/engine-host/rpc.ts",
+    "src/engine-host/engine-compat.ts",
+    "src/engine-host/fs/paths.ts",
+    "src/engine-host/journal.ts",
+    "src/engine-host/launch.ts",
+    "src/engine-host/relay-health.ts",
+    "src/engine-host/transport.ts",
+    "src/main/git/runner.ts",
+    "src/main/index/migrations.ts",
+    "src/renderer/src/app/date-format.ts",
+    "src/renderer/src/composer/dev/resume-spec.ts",
+    "src/renderer/src/harness/agents/api.ts",
+    "src/renderer/src/harness/api.ts",
+    "src/renderer/src/harness/code/api.ts",
+    "src/renderer/src/harness/composer/api.ts",
+    "src/renderer/src/harness/composer/editor-api.ts",
+    "src/renderer/src/harness/document/api.ts", // P3-B M3
+    "src/renderer/src/harness/panel/api.ts",
+    "src/renderer/src/harness/widgets/api.ts",
+    "src/renderer/src/tools/agents/copy.ts",
+    "src/renderer/src/tools/agents/model/elapsed.ts",
+    "src/renderer/src/tools/agents/model/relay.ts",
+    "src/renderer/src/tools/agents/model/task-graph.ts",
+    "src/renderer/src/tools/browser/comment/copy.ts",
+    "src/renderer/src/tools/artifacts/viewers/connectors/copy.ts", // P3-HD M4b: route D's scenes read the sheet's own words
+    "src/renderer/src/tools/presentation/drag-stats.ts", // P4-B2 M0: the drag spec reads the seam's drag probe by its type
+    // P4-AGG M3: the live library run formats install counts with Discover's own words
+    "src/renderer/src/customize/discover/present.ts",
+    "src/renderer/src/customize/discover/copy.ts",
+    "src/renderer/src/customize/connectors/copy.ts", // P4-AGG M4: a connector card's URL line words
+    "src/renderer/src/widgets/plugins/catalog-words.ts",
+    "src/renderer/src/widgets/plugins/library.ts",
+    "test/live/support/live.ts",
+    "test/live/support/tool-time.ts", // P4-A2 (X34): the paid live specs read the tool-time guard after their last turn; P4-A1: the parity bench's arm reads MAWS's tool time through its reader
+    "test/support/agents-fixtures-tail.ts",
+    "test/support/builders.ts",
+    "test/support/chrome-profile.ts",
+    "test/support/claude-env.ts",
+    "test/support/cua-fake-host.ts",
+    "test/support/engine-pin/index.ts",
+    "test/support/file-lock.ts",
+    "test/support/fixture-session-id.ts",
+    "test/support/git-env.ts",
+    "test/support/git-fixture.ts",
+    "test/support/latency-budget.ts",
+    "test/support/live-seed.ts",
+    "test/support/owner-file.ts",
+    "test/support/panel-child-tail.ts",
+    "test/support/plugin-cli-stub.ts",
+    "test/support/plugins-audit.ts",
+    "test/support/prerun-commands.ts",
+    "test/support/probe-file.ts",
+    "test/support/r3-surface.ts",
+    "test/support/relay-health.ts",
+    "test/support/replay-engine.ts",
+    "test/support/scenario.ts",
+    "test/support/scratch-repo.ts",
+    "test/support/shell-home.ts",
+    "test/support/store-fixture.ts",
+    "test/support/synth-transcript.ts",
+    "test/support/widget-backend.ts",
+    // P3-B: e2e/support/document-seed.ts writes the 200-page document through the binding module and the schema module
+    "src/artifacts/yjs/*.ts",
+    "src/artifacts/document/ids.ts",
+    "src/artifacts/document/schema.ts",
+    "src/artifacts/document/provisional-key.ts", // P4-A2 G2: the schema's repair guard reads the layer's key
+    "src/artifacts/document/tabs.ts",
+    "src/artifacts/document/threads.ts",
+    // P3-E (E2 M3): e2e/dashboard.spec.ts binds M1's vendored tables, parsed by the host's own parser
+    "src/artifacts/dashboard/fixtures/datasets.ts",
+    "src/artifacts/dashboard/parse.ts",
+    "src/artifacts/dashboard/datasets.ts",
+    "src/artifacts/dashboard/states.ts",
+    // P3-E (E2 M6): e2e/dashboard-scale.spec.ts binds and draws the scale bench
+    "src/artifacts/dashboard/fixtures/bench.ts"
+  ],
+  "exclude": ["src/shared/**/*.test.ts", "src/shared/**/*.test-d.ts", "src/artifacts/**/*.test.ts"]
+}

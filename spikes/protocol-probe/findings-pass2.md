@@ -1,0 +1,213 @@
+# Protocol probe, second pass: findings
+
+Child C2 of `docs/charter.md` (parent pin 32b75d61; D-18 follow-up pin 4ff2f2df). Engine 2.1.283 run by absolute path. Fixtures under `fixtures/pass2/`, scenarios under `scenarios/pass2/`; run one with `node run-pass2.mjs <scenario>`. `fixtures.test.mjs` asserts each finding below against its fixture (56 tests, 43 from this pass).
+
+## How this pass differed from the first
+
+- The pinned binary was run by absolute path. Pass 1 went through a cmux wrapper found on PATH.
+- The parent session's own variables were scrubbed from the child environment (`CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID`, the messaging socket and token, and similar). The §4.1 `CLAUDE_*` allowlist must exclude these.
+- Auto mode ran on Sonnet, because Haiku cannot hold auto mode.
+- The harness redacts token, key and secret values and email addresses before writing a fixture.
+- About 36 model turns against a budget of roughly 25: one rerun each for rewind and grants, one extra run for item 7.
+
+**Blocker.** The owner's Claude login had expired during this pass: every unrouted model turn failed with "OAuth session expired and could not be refreshed". Unrouted control requests were still recorded. Unrouted model behaviour (items 1 and 13) needs `claude /login`, then `node run-pass2.mjs auto-mode`.
+
+## 1. Usage, models, fork (unrouted)
+
+Observed:
+- Unrouted `get_usage` returned `{subscription_type: null, rate_limits_available: false}`. This is the expired login, not the engine. No `rate_limit_event` appeared in any fixture, routed or unrouted.
+- Unrouted catalogue: default, opus, fable, sonnet, haiku. Routed adds `claude/astra|sol|luna|terra` and three `claude/<vendor>` entries. Each entry carries `supportsAutoMode` and `supportsFastMode`; Haiku lacks auto, every gateway model claims it.
+- `fork_conversation` answers `{forked: false, reason: "unsupported"}` routed and unrouted. It is not a routing quirk.
+
+Design: forking stays the `--fork-session` launch flag. The model picker reads `list_models` and greys auto mode where `supportsAutoMode` is false. Usage windows stay on ClaudeUsage until the unrouted rerun says otherwise.
+
+## 2. Real settings and memory
+
+Observed:
+- `system/init` under the owner's settings lists 39 tools (Workflow, Monitor, LSP, SendMessage and MCP tools among them), 80 commands, 44 skills, 21 agents, 3 MCP servers (ptc and advisor over stdio, openaiDeveloperDocs over HTTP) and 11 plugins.
+- SessionStart hook frames arrive without `--include-hook-events`.
+- Routing: the owner's `settings.json` `env` block sets the gateway URL and token. Removing them from the process environment does not unroute a session that loads user settings. Only `--settings '{"env":{"ANTHROPIC_BASE_URL":"","ANTHROPIC_AUTH_TOKEN":""}}'` does.
+- Memory, macOS RSS of the process tree under the engine pid:
+
+| Case | Tree RSS |
+|---|---|
+| Bare engine, empty settings | 280 to 345 MB peak |
+| Real settings, one session idle | 409 MB (engine 252, ptc MCP 51, advisor MCP 107) |
+| Same, during a tool call | 455 MB snapshot, 555 MB sampled peak |
+| Same, idle after the turn | 420 MB |
+| Three concurrent idle sessions, each | 266, 274, 266 MB (startup peaks 526 to 562 MB) |
+
+Stdio MCP servers are about 40 percent of an idle tree.
+
+Design: budget roughly 270 to 420 MB per idle session and about 550 MB at peak. The unrouted launch adds the empty-string env override through flag settings; unsetting variables is not enough. Session info shows the base URL from `get_status`.
+
+## 3. Workflow
+
+Observed frames, in order: `background_tasks_changed`; `task_started {task_type: "local_workflow", workflow_name}`; a tool result `{status: "async_launched", runId, transcriptDir, scriptPath}`; `task_progress.workflow_progress` carrying a `workflow_phase` entry and `workflow_agent` entries (`agentId, model, state, attempt, tokens, toolCalls, durationMs, resultPreview`); `task_updated {status: "completed"}`; `task_notification {output_file, usage}`; then an engine-initiated follow-up turn producing a `result` the host never asked for.
+
+On disk: `workflows/wf_<run>.json`, `workflows/scripts/*.js`, `subagents/workflows/<run>/journal.jsonl` plus `agent-*` transcripts. Agents ran on opus because the inherited `CLAUDE_CODE_SUBAGENT_MODEL=opus` applied.
+
+Design: treat each `workflow_progress` as a whole snapshot, backfilled from `wf_*.json` and the journal. Accept unsolicited `result` frames and never release a queued message into one. Surface `CLAUDE_CODE_SUBAGENT_MODEL` as a per-session choice.
+
+## 4. Rewind
+
+Observed:
+- `rewind_files` dry run answers "File rewinding is not enabled."
+- `rewind_conversation` without `last_seen_user_message_uuid` refuses with `stale_target`. With it, the answer is `{rewound: true, prefillText, precedingAssistantUuid}` and no reset frame appears on stdout. The next turn sees only the pre-target context.
+- The JSONL is never truncated. A `last-prompt {rewound: true, leafUuid}` anchor is appended with the next write and the new turn branches from the older leaf.
+- The host-supplied `user.uuid` becomes the JSONL record uuid.
+
+Design: the host truncates its own view and pre-fills the composer from `prefillText`. The filesystem service follows parent links from the latest leaf rather than reading records in file order. Always send `last_seen`. File checkpointing is unverified and falls to C3.
+
+## 5. Hooks
+
+Observed:
+- `initialize` with hooks returns `hooks_applied: true`.
+- `hook_callback {callback_id, input: {hook_event_name, tool_name, tool_input, tool_use_id, permission_mode, effort, ...}}` carries no deadline; `additionalContext` in the response is accepted.
+- Settings command hooks emit `hook_started` and `hook_response {stdout, exit_code, outcome}`. Host callback hooks emit neither and are absent from `get_hooks_listing`.
+
+Design: the host owns the UI and the timeout for its own hooks. Lifecycle rows in the transcript cover settings and plugin hooks only.
+
+## 6. Dialogs and elicitation
+
+Observed:
+- The stub MCP server's `elicitation/create` arrives as `elicitation {mcp_server_name, mode: "form", requested_schema}`; `accept` plus `content` reaches the server. The engine advertises `capabilities.elicitation`. No `elicitation_complete` frame.
+- No reachable producer of `request_user_dialog`.
+- `dialogExpiry: "never"` via `--settings` is effective. It is read only from trusted settings sources, and `CLAUDE_CODE_USER_DIALOG_TIMEOUT_MS` overrides it.
+
+Design: set expiry through the launch flag and keep that env var out of the allowlist.
+
+## 7. perTaskStopAffordance
+
+Observed:
+- Without the declaration an interrupt kills a running background workflow (`killed`, then `stopped`). With it the workflow survives.
+- Background Bash survives an interrupt either way.
+- The interrupted foreground call is tagged `non_execution_kind: "user-rejected"`, not `interrupted`. Each background completion triggers a follow-up turn.
+
+Design: declare the affordance and offer per-task `stop_task`. Render `user-rejected` together with an aborted `terminal_reason` as an interruption, not a refusal.
+
+## 8. Trust
+
+Observed:
+- Without attestation, project allow rules are ignored with a stderr notice.
+- `set_cwd` to an untrusted directory returns `needs_trust {directory}`; retrying with trust accepted returns `ok {changed, transcript_relocated}` and the rules load.
+- `workspaceTrust` in `initialize` returns `workspace_trust_recorded: true` and the rules load at once.
+- Trust persists in `~/.claude.json`. This pass added three `/private/tmp` entries there.
+
+Design: show the trust dialog before launch. Attest in `initialize`, or in `claim_session.workspace_trust` for prewarmed spares. Surface the stderr notice as a session warning.
+
+## 9. Grant re-application
+
+Observed:
+- A session grant suppresses repeat prompts and is gone after `--resume`. `apply_flag_settings` with the allow rule restores it: the call is then not prompted.
+- A matching ask rule always outranks an allow rule. Pass 1's claim about precedence was never exercised.
+- A host deny is reported as `permission-rule`; an interrupt as `user-rejected`.
+
+Design: persist grants in the index and re-apply them after initialize. Hide "always allow" when the prompt came from an ask rule (`decision_reason_type: "rule"`). Record human provenance app-side.
+
+## 10. Resume while live
+
+Observed:
+- Against a live print-mode holder there is no guard: both processes write the same session id into one JSONL as sibling branches.
+- Against a `claude --bg` holder the resume is refused ("running as a background session ... --fork-session to branch off a copy"). `--bg` also refuses untrusted directories and runs as a daemon-hosted PTY TUI.
+
+Design: MAWS detects holders itself and opens them read-only. The engine's refusal is authoritative for `--bg`.
+
+## 11. `bash_command` context
+
+Observed:
+- Alone, the replayed bash-input, stdout, stderr and exit-code user records never reach the model's context (it answered "NONE" when asked).
+- A following `shouldQuery: false` user frame does reach it, and emits an empty `result` with a null `terminal_reason`.
+
+Design: keep the §4.2 design (`bash_command`, then the echo). Treat that empty `result` as the echo's receipt, not a turn.
+
+## 12. Prewarm
+
+Observed:
+- A parked spare emits `commands_changed` and sits at 255 MB.
+- `claim_session` takes 88 ms and returns `{status: "ok", session_id, parked_ms, sdk_mcp_settled, initialize}`. The first turn after a claim took 1.56 s.
+- A cold `initialize` takes 0.34 to 0.40 s with empty settings and 0.8 to 1.1 s with the owner's settings.
+
+Design: a one-spare pool is enough. Pass trust at claim time. Spares must use the session's settings sources.
+
+## 13. Auto mode
+
+Observed:
+- Effective mode: on Sonnet, `current_permission_mode` and every `system/init.permissionMode` read `auto`. On Haiku the mode is silently `default`, and switching to auto fails with `auto_mode_model`.
+- `claude/astra` through the gateway accepts auto. Fast mode did not produce `auto_mode_fast_mode` (fast mode needs SDK opt-in, `sdk_opt_in_required`).
+- Server classifier through the gateway: `get_status` reads "Auto mode server: Enabled" with no refusal, latch, dialog, warning or stop text.
+- Allow verdicts are visible. Each `stream_event` `message_delta.safeguard_results` carries `evaluated/not_flagged` keyed by `tool_use_id`. Allows produce no control frames. This contradicts X1's "allow verdicts are not attributable" for the server lane.
+- Only ask rules escalated (`can_use_tool {decision_reason_type: "rule"}`). No classifier denial was provoked: the model refused the force push itself, so the `automode-*` denial kinds were not seen.
+
+Design: attribute server allows from `safeguard_results`. The permission chip trusts only the effective mode and shows the `error_code` on refusal.
+
+## W1 probes (2026-10-01): steers, hooks, `/compact`
+
+Recorded live on the pinned 2.1.283 under a scratch `CLAUDE_CONFIG_DIR` through the relay, Sonnet, by the `W1 …` cases of `test/live/engine-host.live.test.ts` and `scenarios/pass3/terminal-queued.mjs`; about US$2 in all. Wire journals under `fixtures/pass3/`, the same sessions' transcripts under `test/fixtures/transcripts/w1-*.jsonl`.
+
+Observed:
+- A `next` steer still waiting when the turn is interrupted (`steer-next-interrupted`) is not dropped: the interrupt answers `still_queued: [steer]` (seq 33), the turn ends `aborted_tools` naming only the first prompt (seq 37), and the engine at once starts the steer as a turn of its own with no further frame (`started` seq 41, result seq 55 naming only it). On disk it is an ordinary user record whose parent is the interrupt marker. So Esc (an interrupt) sends a waiting steer now, as the owner's ruling wants, while MAWS's plain stop (⌘., the Stop button) first withdraws waiting steers into its own paused queue (`session.interrupt { holdEngineQueued: true }`), so nothing runs after it.
+- A `next` steer then a `now` steer while a tool runs (`steer-next-then-now`): the `now` steer aborts the call (`aborted_tools`) and runs first as its own turn, then the `next` one runs as another turn; neither folds into the other. On disk both are ordinary user records.
+- A delivered `next` steer (`steer-next-disk-live`, the same run as `w1-steer-next-disk.jsonl`) is written to the main transcript only as an attachment `{ type: 'queued_command', prompt, source_uuid: <the steer's uuid>, commandMode: 'prompt', origin: { kind: 'human' }, humanTurn: true }` (line 32), the child of the tool result it followed, with queue-operation records `enqueue` and `remove { reason: 'absorbed_mid_turn' }`. No user record carries the steer's uuid. A prompt the interactive terminal queued mid-turn (`w1-terminal-queued.jsonl` line 26) takes the same path with the same keys (`entrypoint: 'cli'`, an extra `session_id`, its parent a `prompt_snapshot` attachment): the engine's mid-turn fold takes queued commands of priority `next` or higher, and the terminal enqueues with the default `next` (`cli.pretty.js` 810567-810612, 640247). C4's backfill now maps a human `queued_command` in a main transcript to the prompt's `user.message` under `source_uuid` and a `command.lifecycle started`, so a reloaded session folds the steer where the live stream did. Before, it dropped every main-transcript attachment and the steer vanished on reload (it did not split the turn, as the study guessed).
+- `cancel_async_message { message_uuid }` withdraws a waiting `next` steer (`steer-next-cancelled` seq 34-36): `command_lifecycle cancelled` for it, then `{ cancelled: true }`; the running turn finishes as if it was never sent (no replay, no `queued_command`, the result names only the first prompt). A uuid already delivered answers `{ cancelled: false }` with no frame (the engine remembers the stale cancel; no visible effect seen). The engine reads `message_uuid`; C1's `CancelAsyncMessageRequest` declared `uuid` and is corrected. On disk a withdrawn steer leaves only `enqueue` and a bare `dequeue`. This is MAWS's "Hold until the turn ends".
+- Blocking hooks (`hooks-blocking`, hooks in the scratch user settings): a UserPromptSubmit hook runs after `started` and before `system/init`; exiting 2 it reads `outcome: 'error'`, `exit_code: 2`, the reason on stderr, followed by `system/informational` "UserPromptSubmit operation blocked by hook: …" with `prevent_continuation: true` and a `result` with `num_turns: 0` and no `terminal_reason`; no replay, no assistant message, and on disk no user record. A Stop hook answering `{"decision":"block","reason":…}` on stdout reads `outcome: 'success'`, exit 0; the engine then sends a synthetic user frame "Stop hook feedback: …", a `notification` keyed `stop-hook-error` ("Stop hook error occurred · ctrl+o to see"), and the model answers again inside the same turn (one result, `num_turns` 2). On disk: an `isMeta` user record with the feedback, a `hook_blocking_error` attachment and `stop_hook_summary` system records.
+- `/compact` (`compact`, `w1-compact.jsonl`): it opens a turn of its own (`queued`, `started`), then `status` compacting and `compact_result: "success"`, `system/init`, `compact_boundary` with `compact_metadata { trigger: 'manual', pre_tokens, post_tokens, … }` and `logical_parent_uuid`, a synthetic user frame carrying the summary (no `isCompactSummary` on the wire), the replayed `<local-command-stdout>Compacted …`, the replayed `<command-name>/compact</command-name>…` under the send's uuid, and a result with `num_turns: 0` and `result: ""`. On disk, consecutively: the `compact_boundary` system record (`parentUuid: null`), the summary user record with `isCompactSummary: true` and `isVisibleInTranscriptOnly: true`, an `isMeta` `<local-command-caveat>`, the `<command-name>/compact</command-name>` record under the send's uuid, and the `<local-command-stdout>` record. No `local_command` system records.
+
+Design: Enter while a turn runs is a `next` steer; MAWS publishes waiting steers with its queue and withdraws one into its own queue through `cancel_async_message`; the transcript places a taken steer at its delivery position, live and from disk alike; hook outcomes are read from `hook_response` (exit code 2, or `decision: block` / `continue: false` on stdout), and the engine's terminal words for them give way to MAWS's notice.
+
+Not verified here: what the engine's memory of a stale `cancel_async_message` does to a later frame with the same uuid; a blocked prompt and a Stop hook's re-prompt after a reload (no hook events on disk, and the blocked prompt has no user record).
+
+## W4 probes (2026-10-01): skipped questions
+
+Recorded live on the pinned 2.1.283 under a scratch `CLAUDE_CONFIG_DIR` through the relay, Haiku, by `scenarios/pass3/w4-question-skip.mjs` (about US$0.13 in all, a first take included that was re-recorded to name C7 in its provenance). Each run asks one two-question AskUserQuestion ("Which color do you prefer?" single-select, "Which fruits do you like?" multi-select) and answers it the way C3's broker writes a question answer, `{ behavior: 'allow', updatedInput: { ...input, answers } }`, with the second question, or both, left out of `answers` (the W4 stepper's Skip).
+
+Observed:
+- A partial map (`w4-question-partial`, reply seq 163 with `answers: { "Which color do you prefer?": "Red" }`) is accepted: the tool result (seq 167) is not an error and reads `Your questions have been answered: "Which color do you prefer?"="Red". You can now continue with these answers in mind.`; the skipped question is simply absent from it, and `tool_use_result.answers` echoes the partial map. The model went on and wrote `Fruits: NOT ANSWERED`; the turn ended `success`, `terminal_reason: completed`, no permission denials, no error frame.
+- An empty map (`w4-question-none`, reply seq 156 with `answers: {}`) is accepted too: the tool result (seq 159) is not an error and reads `The user did not answer the questions.`; `tool_use_result.answers` is `{}`. The turn ended `success`, `completed`, no error frame.
+- Both match the pinned bundle's AskUserQuestion `call` and tool-result builder (`cli.pretty.js` 163990-164045): an absent answer is unanswered and adds nothing to the summary; no answer at all is the fixed sentence.
+
+Design: the stepper's Skip stays as built (a skipped question left out of the one reply, an empty map when every one is skipped); Esc keeps the plain deny of `pass3/question-deny`. The receipt reads `Not answered` for a question absent from a partial map and `Skipped` for every question of an empty one (the same map a plain deny leaves).
+
+## W7 probes (2026-10-01): a terminal resumes a session MAWS holds
+
+Recorded live on the pinned 2.1.283 under a scratch `CLAUDE_CONFIG_DIR` through the relay, Haiku, by the `W7 a terminal resumes a session MAWS holds` case of `test/live/engine-host.live.test.ts` (about US$0.10 a run, twice). MAWS's engine host is the first writer (C3's launch through the X2 surface, with C4's `fs.*` over the same home and a disk follow of the session, as a tailing pane would); the pinned binary run interactively in a PTY with `--resume <id>` is the second. A turn in each, twice, interleaved; MAWS's process stops; main's resume guard is asked (the Send); the terminal exits; MAWS resumes the id and asks what it remembers. The first run had W7's code absent; the second, whose records are checked in, runs the pre-W7 rules (a registry with no own-record rule, a follower with no pin) beside the product's over the same files. Fixtures: `fixtures/pass3/w7-collision.jsonl` (the notes, meta rows), `fixtures/pass3/w7-collision-disk/` (the transcript and both `sessions/<pid>.json` records).
+
+Observed:
+- MAWS's `-p` process registers `sessions/<pid>.json` with `kind: 'interactive'`, `entrypoint: 'sdk-ts'` and the process table's pid; the terminal's reads `kind: 'interactive'`, `entrypoint: 'cli'`. The engine refuses neither (its guard skips interactive holders, SPEC 35.27.1). Nothing crashed in either run; MAWS's journal ends `exit { code: 0, reason: 'stop' }`.
+- The transcript forks once: the terminal's first prompt and MAWS's next prompt both parent on the last record of MAWS's first turn. Each process keeps its own chain and never reads the other's; the terminal's second turn extends its own branch. No record names a pid; every uuid-bearing record carries `entrypoint`.
+- Pre-W7, the registry emitted MAWS's own record as a `terminal` holder of the session (MAWS's pid), which the index ignored on a `self` record; the newest record wins, so the terminal's join turned it into the terminal's pid; MAWS's exit emitted nothing (the terminal stayed newest), while main wrote holder none at the exit: the row read idle while the terminal held the session, and main's resume guard refused `held`.
+- Pre-W7, a disk follower flipped at every sibling write: MAWS's second prompt retracted the terminal's first turn with "Another process wrote a sibling branch into this transcript", and the terminal's second turn retracted MAWS's: what the owner saw vanish, and a later MAWS write would have brought it back. After MAWS's exit `session.events` answered the exited stream (first run: `lastSeq` 147, 70 events), never the transcript.
+- The terminal's `/exit` writes three user records on its branch (the caveat, the command, `Bye!`), then unlinks its record. MAWS's resume afterwards continued from the branch the file ends on, the terminal's (its prompt parented on the terminal's last record), and the model answered `MAWS_ONE, TERMINAL_ONE, TERMINAL_TWO`: MAWS's second turn had left the model's context.
+- With W7's rules over the same run: MAWS's record is no holder; the terminal's join is the one holder event and a contest; `fs.foreignWrite` fires at the terminal's first record; MAWS's own second prompt still moves the pinned view to MAWS's branch, the terminal's second turn is held back with one notice; after MAWS's exit `session.events` reads disk; the terminal's exit re-folds once (one retraction of MAWS's second turn and the re-fold notice).
+- The interactive binary's updater relinked the shared `~/.local/bin/claude` during the first run (its mtime moved; the target stayed 2.1.287, the newest installed); the second run set `DISABLE_AUTOUPDATER=1` and left it alone.
+
+Design (W7, charter §4.3 as amended 2026-10-01): MAWS tells its own record by entrypoint and the process table's pid and shows a contested state while a foreign holder shares a session it runs; it yields (stops its process once idle, with a notice and its queue paused) when the foreign process writes; the remembered foreign holder holds the record after the exit and the pane follows the transcript; while the foreign process holds the session the follower keeps MAWS's branch in view, and re-folds onto the branch a resume continues from once it exits.
+
+Not verified: the installed 2.1.285 and later against an `sdk-ts` holder (live runs here use the pin); the yield's stop against a live process (its trigger, `fs.foreignWrite`, is live-verified; the stop is the ordinary `session.stop`, unit-tested in `src/main/sessions/yield.test.ts`).
+
+Take over (F2, `W7 take over a session a terminal holds`, `fixtures/pass3/w7-take-over.jsonl`): with MAWS's process stopped and the terminal holding the session after a turn of its own, main's release (`src/main/sessions/take-over.ts`, over the live host, the real signal) found the terminal as the session's one holder, sent SIGTERM to its verified pid and answered `released` 654 ms later: the interactive engine exits by its own handler (code 143, after printing its "Resume this session with" line) and unlinks its record on the way. MAWS's resume then continued from the terminal's last record and the model recalled both prompts (`BEFORE, TERMINAL`). The `claude stop <short>` path for a `--bg` job is unit-tested only (a live job starts a daemon).
+
+## Debt wave 7 probes (2026-10-01): hooks that got in the way, on disk
+
+Recorded live on the pinned 2.1.283 under a scratch `CLAUDE_CONFIG_DIR` through the relay, Sonnet, by the `debt wave 7: blocking hooks, forms flipped` case of `test/live/engine-host.live.test.ts` (US$0.18). W1's hooks with the forms flipped: a Stop hook that blocks the first stop of each session by exiting 2 (`REPROMPT_BY_EXIT_2` on stderr), and a UserPromptSubmit hook that blocks by JSON (`decision: block`), once plainly (`BLOCKED_BY_JSON_HOOK`) and once with `hookSpecificOutput.suppressOriginalPrompt` (`QUIET_BLOCK`); then an ordinary prompt. Wire journal `fixtures/pass3/hooks-flipped.jsonl` (provenance C4), the same session's transcript `test/fixtures/transcripts/dw7-hooks-flipped.jsonl`.
+
+Observed:
+- The exit-2 Stop block reads `outcome: 'error'`, `exit_code: 2` on the wire (seq 30), then the synthetic "Stop hook feedback:" frame and the `stop-hook-error` notification, as W1's JSON block did. On disk it is a meta user record `Stop hook feedback:\n[<command>]: REPROMPT_BY_EXIT_2\n` (line 24) and a `stop_hook_summary`, with no `hook_blocking_error` attachment: the engine writes that attachment only for a JSON block (2.1.283 `hq`), while the feedback record (`ffn`) is written for every blocking Stop hook, one per hook, in either form. The summary's `hookErrors` also lists non-blocking failures, so it cannot tell a block alone.
+- A JSON prompt block reads `outcome: 'success'`, exit 0 on the wire (seq 65 and 82). On disk its `informational` record carries the reason without the command prefix an exit-2 block gets: `UserPromptSubmit operation blocked by hook:\nBLOCKED_BY_JSON_HOOK\n\nOriginal prompt: BLOCKME please reply TWO` (line 31). With `suppressOriginalPrompt` the record is `UserPromptSubmit operation blocked by hook:\nQUIET_BLOCK` (line 35). No user record for either. The `queue-operation enqueue` before line 35 still carries the suppressed prompt's text; the backfill leaves it unread, as the hook asked for the prompt to be left out.
+- The informational records are on the chain: the second block's record parents on the first's, and the next prompt's user record (line 38) parents on the second's.
+
+Design: C4's backfill maps a meta `<Event> hook feedback:` record and a blocked prompt's `informational` record to the hook events the live stream has (`hook.started`, `hook.finished`), and the blocked prompt's record to its turn (start, the prompt from "Original prompt:" when present, end with `num_turns` 0). The disk keeps the blocking error's text, not the exit code, output or hook id, so the finish is stated as a blocking error (exit 2, the reason on stderr, an exit-2 block's `[<command>]: ` prefix dropped); C6's notice reads that unchanged, and both recorded runs read back with the rows they had live, less the exit and the suppressed prompt's bubble (`test/disk-hook-notices.test.ts`). No event field was added. The engine writes the same `informational` record when the hook rejects a queued `next` steer at the mid-turn fold, after a tool result, and the turn runs on (2.1.283 cli.pretty.js 806590-806624 and 810567-810575; from the bundle, not recorded), so the backfill reads one inside a tool loop as a steer folded into the running turn (its `user.message`, `command.lifecycle started`, the hook pair; no turn start or end), and the follower counts only `turn_duration` as a turn end.
+
+Not covered: a UserPromptSubmit hook's `continue: false` (its "Operation stopped by hook" user and informational records) and non-blocking hook failures on disk (`hook_non_blocking_error`), neither recorded.
+
+## Not verified
+
+- Unrouted model turns, the unrouted classifier lane, and the engine's own usage windows (expired login).
+- The `automode-blocked` and `automode-unavailable` denial kinds and the `auto_mode_fast_mode` code.
+- Any producer of `request_user_dialog`.
+- Rewind with file checkpointing enabled.
+
+## Files
+
+- Modified: `harness.mjs` (options for binary path, routing, settings sources, strict MCP, permission mode and extra env; redaction; process-tree RSS), `fixtures.test.mjs`.
+- New: `run-pass2.mjs`; `scenarios/pass2/*.mjs` (17 scenarios, `common.mjs`, a stub MCP server); `fixtures/pass2/*.jsonl` (29 files) and `fixtures/pass2/workflow-disk/`.

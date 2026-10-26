@@ -1,0 +1,35 @@
+# The desk's apps (docs/doperpowers/specs/2026-10-15-desk-design.md §2): apps/desk-hub (DC3), apps/desk-web (DC5). The
+# root package, the Electron app, stays the workspace root.
+packages:
+  - 'apps/*'
+
+nodeLinker: hoisted
+
+allowBuilds:
+  electron: true
+  node-pty: true
+  esbuild: true
+  '@tailwindcss/oxide': true
+  # electron-builder's Windows installer helper; D-11 builds macOS arm64 only.
+  electron-winstaller: false
+  # apps/desk-hub: wrangler's runtime, workerd, links its platform binary (@cloudflare/workerd-<os>-<arch>) at install.
+  workerd: true
+
+# C8c start: one highlight.js for @git-diff-view/* and lowlight. Two copies (the diff view's 11.12.0 and lowlight's
+# 11.11.2) declare the same global types, which tsconfig.web.json's `skipLibCheck: false` refuses; 11.11.2 satisfies
+# every range (lowlight 3.3.0 asks ~11.11.0, @git-diff-view/{core,react,lowlight} 0.1.7 ask ^11.11.0). Drop it when
+# the diff view's range moves (docs/tech-debt-tracker.md).
+overrides:
+  highlight.js: 11.11.2
+# C8c end
+# P3-A start: Yjs v14 pinned exactly (docs/doperpowers/plans/2026-10-12-p3-co-work.md, Decision Log 25 and 28): one
+# `@y/y` and one `lib0` for the whole tree, so the binding module, `@y/protocols` and `@y/prosemirror` share one struct
+# store and one encoder (a second `@y/y` trips v14's duplicate-import guard and breaks `instanceof` across copies), and
+# one `prosemirror-model`, the version S6 ran with Tiptap 3.31.3 and `@y/prosemirror` 2.0.0-15 (a second copy breaks
+# the Tiptap binding). test/artifacts/single-copies.test.ts holds the tree to one copy of each. A re-pin edits these
+# lines, package.json's four pins and `src/artifacts/yjs/` together. Drop an override only when Yjs leaves prerelease
+# and the tree resolves one copy without it (the test says so).
+  '@y/y': 14.0.0-rc.28
+  lib0: 1.0.0-rc.36
+  prosemirror-model: 1.25.12
+# P3-A end

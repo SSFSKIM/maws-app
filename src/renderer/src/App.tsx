@@ -1,0 +1,385 @@
+import { QueryClientProvider } from '@tanstack/react-query';
+import { useEffect } from 'react';
+import { Shell } from './app/Shell';
+import { connectScenarioSessionCreator } from './app/scenario-session-creator';
+import { connectPluginToasts } from './app/plugin-toasts'; // R1
+import { connectEngineSurface, connectSurfaceAsks } from './engine-surface'; // R2
+import { connectPluginPanes } from './engine-surface/panes'; // R2
+import { connectAttention } from './attention/navigation';
+import { registerShellActions } from './app/shell-actions';
+import { ipc } from './ipc/client';
+import { connectShell } from './ipc/events';
+import { queryClient } from './ipc/query';
+import { connectActions, connectKeys } from './keymap/dispatcher';
+import { connectEditClaimants } from './keymap/edit-claimants'; // P4-B2 K6
+import { connectVisibility } from './session/visibility';
+import { persistLayout } from './stores/layout';
+import { useSettings } from './stores/settings';
+import { connectTranscript } from './transcript/shell'; // C6
+// C8a start
+import { registerSlot } from './app/slots';
+import { connectPanelEvents } from './ipc/events';
+import { connectPanelHost, registerPanelTool } from './panel/host';
+import { PanelHost } from './panel/PanelHost';
+import { adoptTerminals, terminalTool } from './tools/terminal';
+// C8a end
+// C7 start
+import { ComposerAppKeys, connectComposer, connectInlineEdit, WidgetDialogHost } from './composer';
+import { connectRequestCard } from './request-card';
+import { connectStatusLine } from './statusline';
+import { DEFAULT_ACTIONS, registerTranscriptActions } from './transcript';
+import { setHostActions } from './transcript/view/context'; // P3-F wave S (F14 review 2)
+// C7 end
+// C8c start
+import { connectCodeEvents } from './ipc/events';
+import { codeTranscriptActions, registerCodeTools } from './tools/code';
+import { registerTranscriptActions as registerCodeTranscriptActions } from './transcript';
+// C8c end
+// C10 start
+import { registerSetupIntentHook } from './composer/setup-intent';
+import { connectSessions } from './sessions/connect';
+import { SessionDialogs } from './sessions/SessionDialogs';
+import { useSetupIntent } from './sessions/useSetupIntent';
+// C10 end
+// P4-AGG M3
+import { connectCatalogEvents } from './customize/discover/read';
+import { connectSignInEvents } from './customize/connectors/sign-in';
+// C8b start
+import { connectAgentWorkEvents } from './ipc/events';
+import { agentsDevSurface, agentTranscriptActions, registerAgentTools } from './tools/agents';
+// C8b end
+// C11 start
+import { registerGatewayActions } from './gateway/actions';
+import { connectDirectLogin } from './gateway/direct-login';
+import { startRelayMonitor } from './gateway/relay-monitor';
+import { GatewayDialogs } from './gateway/SwitchSheet';
+import { sessionInfoTool } from './tools/session-info';
+import { registerAllWidgets } from './widgets';
+import { connectMonoFont, connectTranscriptWidth, registerSettingsTab } from './settings-tab';
+// C11 end
+// C12 start
+import { BudgetSheets } from './budget/BudgetSheets';
+import { connectBudget } from './budget/store';
+import { connectQuitWait } from './lifecycle/quit-wait';
+// C12 end
+// W6 start
+import { registerUsage } from './usage';
+// W6 end
+// E9 start
+import { DictationKeys } from './composer';
+// E9 end
+// E5 start
+import { EditorDialogs } from './tools/code';
+// E5 end
+// E1 start
+import { mawsTranscriptActions } from './tools/maws/actions';
+import { askSheetTool } from './tools/maws/ask/AskSheetTool';
+import { connectAsks } from './tools/maws/ask/connect';
+import { connectPaneShows } from './tools/maws/panes/connect';
+import { registerTranscriptActions as registerMawsTranscriptActions } from './transcript';
+// E1 end
+// E6 start
+import { connectScmRunEnds, registerScmTool } from './tools/scm';
+// E6 end
+// E3 start
+import { CommentComposerHost } from './side/CommentComposer';
+import { connectSide, registerSidePane } from './side/register';
+// E3 end
+// E2 start
+import { registerTranscriptActions as registerArtifactTranscriptActions } from './transcript';
+// E2 end
+// E10 start
+import { connectSupervisorNotices } from './app/supervisor-notices';
+// E10 end
+// E4a start
+import { browserTool } from './tools/browser/BrowserTool';
+import { BrowserTab } from './tools/browser/BrowserTab';
+import { connectBrowser } from './tools/browser/store';
+// E4a end
+// E4d start
+import { connectBrowserComment } from './tools/browser/comment/connect';
+import { CommentToggle } from './tools/browser/comment/CommentToggle';
+import { openBrowserUrl } from './tools/browser/comment/actions';
+import { registerChromeExtra } from './tools/browser/extras';
+import { registerTranscriptActions as registerBrowserTranscriptActions } from './transcript';
+// E4d end
+// E4b start
+import { connectBrowserImport } from './tools/browser/import/store';
+// E4b end
+// cua #90 start
+import { ProfileSheets } from './tools/browser/import/ProfileSheets';
+// cua #90 end
+// E4c start
+import { openBrowserTab } from './tools/browser/agent/actions';
+import { connectBrowserActivity } from './tools/browser/agent/activity'; // E13
+import { connectBrowserAgent } from './tools/browser/agent/connect';
+import { registerTranscriptActions as registerBrowserAgentTranscriptActions } from './transcript';
+// E4c end
+// P3-L start
+import { registerArtifactTabs } from './library/ArtifactTab';
+import { openArtifactTab } from './library/actions'; // P3-F wave S (F14)
+import { artifactsTool, openArtifactInPanel } from './tools/artifacts/ArtifactsTool';
+import { registerByteViewers } from './tools/artifacts/viewers/register';
+import { Library } from './library/Library';
+import { connectLibrary } from './library/store';
+// P3-L end
+// P3-B start
+import { registerDocumentEditor } from './tools/document';
+// P3-B end
+// P3-D start
+import { DOCUMENT_DESIGN_SYSTEM } from './artifacts/design-system/documents';
+import { registerDesignSystemEditor } from './artifacts/design-system/editor';
+import { DesignSystemHostProvider } from './artifacts/design-system/provider';
+import { provideDocumentDesignSystem } from './tools/document/design-system';
+// P3-D end
+// P3-C start
+import { registerPresentationEditor } from './tools/presentation';
+// P3-C end
+// P3-E start (E1 M3; E2 M3)
+import { registerDesignEditor } from './tools/design';
+import { registerDashboardEditor } from './tools/dashboard';
+// P3-E end
+// P4-B5 start
+import { connectDelivery } from './delivery/store';
+import { SendToHost } from './delivery/SendToSheet';
+// P4-B5 end
+
+// C10 start: C7's composer binds an unstarted session's chips and Send through C10's hook; registered at module load,
+// before any composer renders, so the function the composer calls as a hook is fixed for the page's life (C7's rule)
+registerSetupIntentHook(useSetupIntent);
+// C10 end
+// P3-D start: D's apply API for B's document page (the P3 spec's Decision Log 61): the page calls its `systemFor` as a hook,
+// so it is provided at module load, before any page renders, and fixed for the page's life (C7's rule, as C10's above)
+provideDocumentDesignSystem(DOCUMENT_DESIGN_SYSTEM);
+// P3-D end
+// P3-F wave S (F14 review 2): the actions a Markdown surface outside any Transcript reads (the Side tool's answer, the ask
+// sheet's previews, the Code tool's preview, a plugin surface) open an artifact link's main tab, so its chip works there;
+// at module load, before any surface renders
+setHostActions({ ...DEFAULT_ACTIONS, openArtifactTab });
+
+export function App() {
+  const resolvedTheme = useSettings((s) => s.state?.resolvedTheme);
+
+  useEffect(() => useSettings.getState().connect(), []);
+  useEffect(() => connectShell(), []); // C5: sessions, attention and layout, app-wide
+  useEffect(() => persistLayout(ipc), []); // C5: changed layout keys back to main
+  useEffect(() => registerShellActions(), []); // C5: the frame's action handlers
+  useEffect(() => connectAttention(), []); // C5: ⌘⇧J, notification clicks and the fallback toast
+  useEffect(() => connectPluginToasts(), []); // R1: a plugin's toast, for a session this window shows
+  useEffect(() => connectEngineSurface(), []); // R2: the engine's drawings re-asked when it invalidates them
+  useEffect(() => connectSurfaceAsks(), []); // R2: a plugin's copy and prompt requests, answered by this window
+  useEffect(() => connectPluginPanes(), []); // R2: a plugin's panes as panel tabs, from the engine's roster
+  useEffect(() => connectKeys(), []); // C5: renderer-sink chords, bound to the element that holds focus
+  useEffect(() => connectActions(), []); // C5: menu actions in, the enabled set out
+  useEffect(() => connectEditClaimants(), []); // P4-B2 K6: Edit ▸ Undo and Redo, the focused editor's or native
+  useEffect(() => connectScenarioSessionCreator(), []); // C5: the stub's session creator in launch mode scenario
+  useEffect(() => connectVisibility(), []); // C5: which sessions are on screen, for the unread rule
+  useEffect(() => connectTranscript(), []); // C6: the transcript slot and its path chips' file tabs
+  useEffect(() => connectCatalogEvents(), []); // P4-AGG M3: Discover's reads stale on catalog.changed, shown or not
+  useEffect(() => connectSignInEvents(), []); // P4-AGG M4: a connector's sign-in, heard whatever the page shows
+  // C8a start: the panel host into C5's slot, and its store-driven transitions (the hydration barrier, reconciliation,
+  // the collapse focus). Below `persistLayout` on purpose: the barrier writes inside the hydration notification, and
+  // persistence must already be subscribed to hear it.
+  useEffect(() => {
+    registerSlot('panelHost', PanelHost);
+    return connectPanelHost();
+  }, []);
+  useEffect(() => connectPanelEvents(), []); // the summary's git.changed and fs.workflowChanged
+  // Tool registration is the panel host's line (ruling O2). Never unregistered: a registration's disposer closes the
+  // tool's tabs, which StrictMode's effect replay would do on every mount.
+  useEffect(() => {
+    registerPanelTool(terminalTool); // C9's Terminal
+    // After a renderer reload the PTY host still runs the shells of the restored Terminal tabs: re-adopt them. A tab
+    // restored before this answers waits for it (`ensureTerminal`), so it reattaches rather than starting a second shell.
+    void adoptTerminals();
+  }, []);
+  // C8a end
+  // C7 start: the X4 card in C5's requestCard slot (docked, card, hover) and C6's transcript request slot (inline)
+  useEffect(() => connectRequestCard(), []);
+  useEffect(() => connectStatusLine(), []); // the shared ClaudeUsage read, app-wide
+  useEffect(() => connectComposer(), []); // the composer in C5's composer slot
+  useEffect(() => connectInlineEdit(), []); // W3 (B6): a bubble's Edit, and a blocked prompt's Edit prompt (W1), edit the bubble in place
+  // C7 end
+  // C8c start: Review, Files, the file viewer and the diff tab, registered once and never unregistered, as C8a's block
+  // does (a registration's disposer closes the tool's tabs); main's files.changed; and the transcript's two callbacks
+  // (K3), registered after C6's `connectTranscript` so they win over its file-tab default.
+  useEffect(() => {
+    registerCodeTools();
+  }, []);
+  useEffect(() => connectCodeEvents(), []);
+  useEffect(() => registerCodeTranscriptActions(codeTranscriptActions), []);
+  // C8c end
+  // C10 start: the setup store and C5's tab retention at once (before hydration's snapshots answer); in launch mode
+  // `index`, the newSession slot, the session creator, the close guard, the unstarted title and the session actions
+  useEffect(() => connectSessions(), []);
+  // C10 end
+  // C8b start: the agent tools (Subagents, Background work and the Log). Registration is never undone (a registration's
+  // disposer closes the tool's tabs, which StrictMode's effect replay would do); the transcript's subagent rows open
+  // Subagents (a workflow's, Background work) and its "Open full log" opens the Log (openFullLog); a task list changed
+  // on disk refreshes its checklist; development builds expose the stores the live acceptance reads.
+  useEffect(() => registerAgentTools(), []);
+  useEffect(() => registerTranscriptActions(agentTranscriptActions), []);
+  useEffect(() => connectAgentWorkEvents(), []);
+  useEffect(() => {
+    if (import.meta.env.DEV) window.__maws_agents = agentsDevSurface();
+  }, []);
+  // C8b end
+  // C11 start: Settings… and Open ClaudeUsage in the action table (W6: Usage is the usage popover's); the relay
+  // monitor's app-wide banner while a routed session is live; a widget for every name of the slash palette
+  useEffect(() => registerGatewayActions(), []);
+  useEffect(() => startRelayMonitor(), []);
+  useEffect(() => registerAllWidgets(), []);
+  // M4: a Direct session's login from every get_status answer (W2: the routing footer left with the status line; the
+  // route and its switch are Session info's)
+  useEffect(() => connectDirectLogin(queryClient), []);
+  // Session info in the panel's "+" menu, registered once and never unregistered, as C8a's block does
+  useEffect(() => {
+    registerPanelTool(sessionInfoTool);
+  }, []);
+  // M5: the Settings tab in C5's slot (W6: the Accounts tab retired into the top bar's usage popover), and
+  // appearance.monoFont as the root --font-mono override
+  useEffect(() => {
+    registerSettingsTab();
+  }, []);
+  useEffect(() => connectMonoFont(), []);
+  useEffect(() => connectTranscriptWidth(), []); // W2: appearance.transcriptWidth as the root --measure
+  // C11 end
+  // C12 start: the engine host's memory budget (Session info's line, Settings' default) and its app-wide banner
+  useEffect(() => connectBudget(), []);
+  useEffect(() => connectQuitWait(), []); // M4: Quit when idle's banner while main holds the quit
+  // C12 end
+  // W6 start: the top bar's usage pill and its popover, the copy of ClaudeUsage's panel (E1), and the Usage action
+  useEffect(() => registerUsage(), []);
+  // W6 end
+  // E1 start: the maws tool server's renderer side: a pane `show_pane` asks for, opened by a window that knows the
+  // session; the capsule's and the delivery row's actions (the Question sheet, Open externally, Reveal in Finder)
+  useEffect(() => connectPaneShows(), []);
+  useEffect(() => registerMawsTranscriptActions(mawsTranscriptActions), []);
+  // M4: the Question sheet, registered once and never unregistered (C8a's rule above), and the live asks that open it
+  useEffect(() => {
+    registerPanelTool(askSheetTool);
+  }, []);
+  useEffect(() => connectAsks(), []);
+  // E1 end
+  // E6 start: the Source control tool in the panel's "+" menu (and `show_pane`'s `source-control`), registered once and
+  // never unregistered, as C8a's block does
+  useEffect(() => {
+    registerScmTool();
+  }, []);
+  // and a run's end reads every PR state again, whether or not a Source control body is mounted
+  useEffect(() => connectScmRunEnds(), []);
+  // E6 end
+  // E3 start: side threads (E3 execution document, M3): the Side pane, registered once and never unregistered (C8a's
+  // rule above); the comment composer in E5's seam and the transcript's summary-row Open
+  useEffect(() => {
+    registerSidePane();
+  }, []);
+  useEffect(() => connectSide(), []);
+  // E3 end
+  // E2 start: the panel tool registered once and never unregistered (C8a's rule above); the transcript's artifact row
+  // and a delivered file's name open it. P3-L (M6b): the Artifacts tool, E2's Deliverables tool and its main tab gone.
+  useEffect(() => {
+    registerPanelTool(artifactsTool);
+  }, []);
+  useEffect(() => registerArtifactTranscriptActions({ openArtifact: openArtifactInPanel, openArtifactTab }), []); // P3-F wave S (F14): openArtifactTab, an artifact link's ⌘-click
+  // E2 end
+  // E10 start: the supervisor's update and incompatibility banners and its crash toast, from main's host.status; this
+  // connects the hosts store app-wide (Diagnostics and Settings read it too)
+  useEffect(() => connectSupervisorNotices(), []);
+  // E10 end
+  // E4a start: the Browser tool and its main tab, registered once and never unregistered (C8a's rule above), and the
+  // window's mirror of main's browser tabs (the list, then its events)
+  useEffect(() => {
+    registerPanelTool(browserTool);
+    registerSlot('browserTab', BrowserTab);
+  }, []);
+  useEffect(() => connectBrowser(), []);
+  // E4a end
+  // E4d start: comment mode (E4d execution document, M3): the chrome's Comment toggle in E4a's extras slot, and main's
+  // comment-mode events (the toggle's store; a pick opens E3's composer through E5's seam); the transcript's page-element
+  // chip opens its page in the in-app browser
+  useEffect(() => registerChromeExtra(CommentToggle), []);
+  useEffect(() => connectBrowserComment(), []);
+  useEffect(() => registerBrowserTranscriptActions({ openBrowserUrl }), []);
+  // E4d end
+  // E4b start: the Chrome profile import's mirror (the run's progress and end, the imported records), app-wide so a run
+  // that ends with no sheet mounted still makes its profile the active one
+  useEffect(() => connectBrowserImport(), []);
+  // E4b end
+  // E4c start: the browser action rows' Open tab (E4c execution document, Design §10; the rows of journals written before
+  // the browser tools left, P1 A-54); the Browser tool following the agent (restored for cua's leases, A-54 amended)
+  useEffect(() => connectBrowserActivity(), []); // E13: what an agent did through cua, for the transcript's rows
+  useEffect(() => registerBrowserAgentTranscriptActions({ openBrowserTab }), []);
+  useEffect(() => connectBrowserAgent(), []);
+  // E4c end
+  // P3-L start: the library store reads main's index again at every committed change (`library.changed`), and the
+  // `artifact` tab kind's handlers
+  useEffect(() => connectLibrary(), []);
+  useEffect(() => registerArtifactTabs(), []); // an `artifact` tab with unsaved changes is not replaced by a session
+  useEffect(() => registerSlot('artifactsLibrary', Library), []); // the Artifacts tab's library, in P3-G's slot
+  useEffect(() => registerByteViewers(), []); // M5b: the html and file viewers on maws-artifact:, and their frames' console
+  // P3-L end
+  // P3-B start: the document kind's editor in L's registry (the panel's Artifacts tool and an `artifact` main tab)
+  useEffect(() => registerDocumentEditor(), []);
+  // P3-B end
+  // P3-D start: the Design System page as the `design_system` kind's editor in L's registry (the library's tab and the
+  // panel's Artifacts tool mount it)
+  useEffect(() => registerDesignSystemEditor(), []);
+  // P3-D end
+  // P3-C start: the deck editor as the `presentation` kind's editor in L's registry (the library's tab and the panel's
+  // Artifacts tool mount it)
+  useEffect(() => registerPresentationEditor(), []);
+  // P3-C end
+  // P3-E start: the dashboard editor as the `dashboard` kind's editor in L's registry (B's document body with E's charts,
+  // the Datasets action and the source sheet; docs/doperpowers/plans/2026-10-16-p3-e2-dashboard.md M3)
+  useEffect(() => registerDashboardEditor(), []);
+  // the design workbench as the `design` kind's editor in L's registry (E1 M3; the library's tab and the
+  // panel's Artifacts tool mount it)
+  useEffect(() => registerDesignEditor(), []);
+  // P3-E end
+  useEffect(() => connectDelivery(), []); // P4-B5: main's Send to receipts, for the headers and the library's rows
+
+  // index.html ships data-theme="light" for the first paint; from then on main's resolved theme decides.
+  useEffect(() => {
+    if (resolvedTheme) document.documentElement.dataset.theme = resolvedTheme;
+  }, [resolvedTheme]);
+
+  return (
+    <QueryClientProvider client={queryClient}>
+      {/* P3-D start: every design-system consumer reaches the store through the window's ArtifactHost */}
+      <DesignSystemHostProvider>
+      {/* P3-D end */}
+      <Shell />
+      {/* C7 start: the one app-level ⌘. and ⌘L, resolving the focused pane's session */}
+      <ComposerAppKeys />
+      {/* W3 (C6): the slash widgets' floating dialog */}
+      <WidgetDialogHost />
+      {/* C7 end */}
+      {/* C10 start: the small sheets (rename, fork, archive, delete, cleanup, archived sessions) */}
+      <SessionDialogs />
+      {/* C10 end */}
+      {/* C11 start: the route switch's confirm and pickDirectModel's dialog */}
+      <GatewayDialogs />
+      {/* C11 end */}
+      {/* C12 start: the memory budget's blocked sessions and stop sheets */}
+      <BudgetSheets />
+      {/* C12 end */}
+      {/* E9 start: dictation's one controller, for the composer microphone's clicks and the composer.dictate hold once bound */}
+      <DictationKeys />
+      {/* E9 end */}
+      {/* E5 start: the editor's close sheet (registerEditor's guard, registered by C8c's registerCodeTools) */}
+      <EditorDialogs />
+      {/* E5 end */}
+      {/* E3 start: the comment composer's sheet, opened through E5's seam */}
+      <CommentComposerHost />
+      {/* E3 end */}
+      {/* cua #90: the profile popover's Re-import this profile…, the removal's then the import's sheet */}
+      <ProfileSheets />
+      {/* P4-B5: the Send to sheet, from an editor header's Send to or a library row's Export menu */}
+      <SendToHost />
+      {/* P3-D start */}
+      </DesignSystemHostProvider>
+      {/* P3-D end */}
+    </QueryClientProvider>
+  );
+}
