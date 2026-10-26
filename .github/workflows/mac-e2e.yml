@@ -37,13 +37,16 @@ jobs:
     env:
       MAWS_E2E_QUIET: '1'
       SHELL: /bin/zsh
+      # The private gate's limit: the harness build runs out of Node's default heap.
+      NODE_OPTIONS: --max-old-space-size=5120
     steps:
       - id: checkout
         uses: actions/checkout@v7
       - id: machine
         run: |
           echo "ci-kit desktop: $(sw_vers -productVersion) $(sysctl -n machdep.cpu.brand_string) cpus $(sysctl -n hw.ncpu) memory $(( $(sysctl -n hw.memsize) / 1073741824 )) GiB"
-          system_profiler SPDisplaysDataType 2>/dev/null | grep -E 'Resolution|Retina|Main Display' || true
+          system_profiler SPDisplaysDataType 2>&1 | sed -n '/Displays:/,$p' || true
+          brew install -q displayplacer >/dev/null 2>&1 && displayplacer list | grep -E 'Persistent|Resolution:|Scaling|mode [0-9]+:' | head -40 || true
       - uses: ./.github/actions/setup
         with:
           e2e: 'true'
