@@ -45,8 +45,14 @@ jobs:
       - id: machine
         run: |
           echo "ci-kit desktop: $(sw_vers -productVersion) $(sysctl -n machdep.cpu.brand_string) cpus $(sysctl -n hw.ncpu) memory $(( $(sysctl -n hw.memsize) / 1073741824 )) GiB"
-          system_profiler SPDisplaysDataType 2>&1 | sed -n '/Displays:/,$p' || true
-          brew install -q displayplacer >/dev/null 2>&1 && displayplacer list | grep -E 'Persistent|Resolution:|Scaling|mode [0-9]+:' | head -40 || true
+      # The runner's one display starts at 1024x768, smaller than the e2e window (1280x820), which macOS then clamps:
+      # 1920x1080 is its largest mode.
+      - name: display
+        run: |
+          brew install -q displayplacer >/dev/null
+          id=$(displayplacer list | sed -n 's/^Persistent screen id: //p' | head -1)
+          displayplacer "id:$id res:1920x1080 hz:60 color_depth:7 scaling:off origin:(0,0) degree:0"
+          displayplacer list | grep -E '^(Resolution|Scaling):'
       - uses: ./.github/actions/setup
         with:
           e2e: 'true'
