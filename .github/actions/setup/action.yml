@@ -3,17 +3,21 @@ description: >-
   The shared setup of .github/workflows/gate.yml (docs/doperpowers/plans/2026-10-14-gate-offload.md §3.2), run after
   the checkout: pnpm from packageManager, Node 22 and the frozen install. Hosted Linux jobs cache the pnpm store and
   Electron's download by its version; the self-hosted runners (the macOS runner, ci-kit's pool) rely on their own disks
-  and take pnpm through corepack, never pnpm/action-setup. maws-app's hosted Macs cache nothing (a cache saved on a
+  and take pnpm through corepack, never pnpm/action-setup, as maws-app's hosted Macs do too. maws-app's hosted Macs cache nothing (a cache saved on a
   ci/hosted/ branch is that branch's alone), and their setup first sets the display to 1920x1080 at 1x and prints the
   desktop's line.
-  Every lane applies .github/ci-kit.yml. On Linux, e2e jobs also lift Electron's sandbox restriction, and groups that
-  render documents through LibreOffice install it separately.
+  Every lane applies .github/ci-kit.yml; GitHub-hosted macOS groups omit LibreOffice and Poppler unless they need them.
+  Self-hosted Macs apply the full declaration. On Linux, e2e jobs also lift Electron's sandbox restriction, and groups
+  that render documents through LibreOffice install it separately.
 inputs:
   e2e:
     description: Lift the apparmor restriction on unprivileged user namespaces for Electron's sandbox.
     default: 'false'
   libreoffice:
-    description: Install LibreOffice Writer and Impress.
+    description: Install LibreOffice for this group on Linux or a hosted Mac (self-hosted Macs always apply the declaration).
+    default: 'false'
+  poppler:
+    description: Install the declared Poppler formula for this hosted Mac group (self-hosted Macs always apply the declaration).
     default: 'false'
   apt:
     description: More apt packages for a Linux runner, space-separated.
@@ -24,21 +28,32 @@ runs:
     # A GitHub-hosted Mac (maws-app's hosted-mac.yml; ci-kit's docs/doperpowers/specs/2026-10-26-maws-hosted-mac-design.md,
     # The three desktops): its one display starts at 1024x768, which clamps the e2e window (1280x820, e2e/support/launch.ts),
     # and offers no scaled mode, so every hosted job runs at its largest, 1920x1080 at 1x, set here rather than found by
-    # each job. The line names the desktop as the app sees it (the main screen's points and backing scale), and any
-    # other display fails the job.
+    # each job. The Dock hides itself there too: a shown Dock takes about 70 points of the 1080, so a window the specs
+    # size to 982 points of content (settings' 1512x982) was clamped short of it. The line names the desktop as the app
+    # sees it (the main screen's points and backing scale, the Dock, the visible frame), and any other display fails the
+    # job. displayplacer is its release's arm64 binary (macos-26 is Apple silicon), pinned by digest: brew's install of
+    # the same 1.4.0 took about 11 s of every hosted job.
     - if: runner.environment == 'github-hosted' && runner.os == 'macOS'
       shell: bash
-      env:
-        HOMEBREW_NO_AUTO_UPDATE: '1'
-        HOMEBREW_NO_INSTALL_CLEANUP: '1'
       run: |
-        brew install -q displayplacer >/dev/null
-        id=$(displayplacer list | sed -n 's/^Persistent screen id: //p' | head -1)
-        displayplacer "id:$id res:1920x1080 hz:60 color_depth:7 scaling:off origin:(0,0) degree:0"
+        displayplacer=$RUNNER_TEMP/displayplacer
+        curl -fsSL --retry 3 -o "$displayplacer" https://github.com/jakehilborn/displayplacer/releases/download/v1.4.0/displayplacer-apple-v140
+        echo "0572c3d2918e47c7e0b9d7723907864e2ea2b53b9d3b02379769fffcf44f7ea0  $displayplacer" | shasum -a 256 -c --quiet
+        chmod +x "$displayplacer"
+        id=$("$displayplacer" list | sed -n 's/^Persistent screen id: //p' | head -1)
+        "$displayplacer" "id:$id res:1920x1080 hz:60 color_depth:7 scaling:off origin:(0,0) degree:0"
+        defaults write com.apple.dock autohide -bool true
+        killall Dock
         display=$(osascript -l JavaScript -e 'ObjC.import("AppKit"); const s = $.NSScreen.mainScreen; `${s.frame.size.width}x${s.frame.size.height}@${s.backingScaleFactor}x`')
-        echo "ci-kit desktop: $(sw_vers -productVersion) $(sysctl -n machdep.cpu.brand_string) cpus $(sysctl -n hw.ncpu) memory $(($(sysctl -n hw.memsize) / 1073741824)) GiB display $display"
+        echo "ci-kit desktop: $(sw_vers -productVersion) $(sysctl -n machdep.cpu.brand_string) cpus $(sysctl -n hw.ncpu) memory $(($(sysctl -n hw.memsize) / 1073741824)) GiB display $display $(.github/scripts/desktop-dock.sh --wait 15)"
         if [[ $display != 1920x1080@1x ]]; then echo "::error title=ci-kit desktop::the display is $display, not 1920x1080@1x"; exit 1; fi
-    - if: runner.environment != 'self-hosted'
+    # ci-kit's own Macs (the mini's host and its guest): their display mode is ci-kit's job-started line (`ci-kit desktop
+    # (job-started): … display=…`); beside it, the Dock and the visible frame, read from the job, never set.
+    - if: runner.environment == 'self-hosted' && runner.os == 'macOS'
+      shell: bash
+      run: |
+        echo "MAWS desktop: $(.github/scripts/desktop-dock.sh)"
+    - if: runner.environment != 'self-hosted' && runner.os != 'macOS'
       uses: pnpm/action-setup@v6
     - uses: actions/setup-node@v7
       with:
@@ -48,8 +63,9 @@ runs:
     # corepack at packageManager's version, so no job switches versions: on a pool box, whose pnpm store is shared
     # between jobs, pnpm/action-setup's self-update breaks from the box's second job on; on the Mac the switch (11.19.0
     # to 11.23.0 in run 38866065402's e2e:tools job) spawned `open`, which put a URL in the owner's browser. The shims go
-    # to the job's own directory, not Node's shared tool cache.
-    - if: runner.environment == 'self-hosted'
+    # to the job's own directory, not Node's shared tool cache. A GitHub-hosted Mac (maws-app) takes the same path:
+    # pnpm/action-setup's self-installer took about 12 s of every hosted job there.
+    - if: runner.environment == 'self-hosted' || runner.os == 'macOS'
       shell: bash
       run: |
         mkdir -p "$RUNNER_TEMP/bin"
@@ -69,7 +85,10 @@ runs:
     - uses: SSFSKIM/ci-kit/setup@v1
       with:
         install: 'true'
-    # Group-specific Linux packages; the declaration supplies every lane's common tools and macOS's LibreOffice.
+        # Only hosted per-group jobs have a complete dependency signal here. Self-hosted unit, packaged and default
+        # jobs can need these tools without setting the per-group inputs, so they keep the declaration's full presence check.
+        skip: ${{ runner.os == 'macOS' && runner.environment == 'github-hosted' && format('{0} {1}', inputs.libreoffice != 'true' && 'cask:libreoffice' || '', inputs.poppler != 'true' && 'brew:poppler' || '') || '' }}
+    # Group-specific Linux packages; macOS takes LibreOffice from the declaration.
     - if: runner.os == 'Linux' && (inputs.libreoffice == 'true' || inputs.apt != '')
       shell: bash
       env:

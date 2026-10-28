@@ -7,7 +7,18 @@
 //   - serves subscriptions (session.ts), and the depth's `rows`, `diff`, and (as DC8's producer) `output`;
 //   - as the desk control surface's M0 producer (`m0`), advertises its sessions' bridge capabilities and its own `desk`,
 //     answers `read status`, and runs `command` RPCs through the vendored route table, answered at once and reported
-//     as `op` messages (commands.ts), a stale session (`staleSessions`, `reload`) kept without capabilities;
+//     as `op` messages (commands.ts), a stale session (`staleSessions`, `reload`) kept without capabilities; as the
+//     machine-side wave's MW1 producer (`mw1`), answers the reads of usage, config, settings and MCP as recorded and
+//     carries each control's capability in `capabilities.controls`; as MW2's (`mw2`), answers a side question (`btw`)
+//     at once and its answer as `op` notices, as the MW2 live check recorded them, and takes compact's `instructions`;
+//     as MW3's (`mw3`), raises the MW3 live check's permission requests with the engine's suggestions
+//     (`raiseRecordedScoped`) and takes `decide`'s `scope`, resolved from the request it holds as the daemon resolves it;
+//     as MW4's (`mw4`), stops or tells one subagent its bridge's tree holds as running (`stop-agent`, `tell`), by an id
+//     first, then one running agent's name, refusing any other `unknown-agent` and a shared name `ambiguous-agent` before
+//     the claim, acting on the agent the check resolved, keeping a stop across a crash, and spawns the MW4 live check's
+//     named agent (`spawnRecordedAgent`); as MW5's (`mw5`), takes an upload (`media`), checked as the daemon checks it,
+//     answered `queued` with the root under the session's live working directory, and each attachment's states sent as
+//     `op` notices in the order the MW5 live check recorded them;
 //   - answers RPCs from a script, with a ledger of its own: a nonce is claimed before the effect and its outcome recorded
 //     before the result, and a nonce the ledger knows is never executed again;
 //   - can drop its connection, end a session's process while it stays connected, crash after an RPC's effect and before
@@ -22,13 +33,13 @@ import { decodeEnrollmentCode, type Redeemed } from '../src/protocol/identity';
 import type { JsonObject } from '../src/protocol/json';
 import type { LogEvent, Vector } from '../src/protocol/log';
 import type { DownFrame, OrgFrame, Refusal, RejectionReason, UpFrame } from '../src/protocol/machine';
-import { RPC_FRESHNESS_MS, RPC_NAMES, type Rpc, type RpcError, type RpcName, type RpcOutcome } from '../src/protocol/rpc';
-import type { Delivery, MachinePresence, Raised, SessionMessage, Settled } from '../src/protocol/session';
+import { MEDIA_TYPES, RPC_FRESHNESS_MS, RPC_NAMES, type MediaType, type Rpc, type RpcError, type RpcName, type RpcOutcome } from '../src/protocol/rpc';
+import type { Delivery, MachinePresence, MediaOpBody, MediaState, OpBody, PermissionUpdate, Raised, SessionMessage, Settled } from '../src/protocol/session';
 import { Link, LinkError, type Credentials } from './link';
 import { emptyMemory, expireLedger, type Memory } from './memory';
 import type { Recording, Row, Step } from './recording';
 import { Commands, opMessages, refusalMessage, type CommandPlan, type CommandScript } from './commands';
-import { M0_SMINOS, M1_SMINOS, producerAtLeast, SessionDepth, type BridgePlugin, type Producer, type SnapshotOptions } from './session';
+import { MW2_BTW, MW3_SCOPED, MW4_AGENTS, producerAtLeast, SessionDepth, sminosOf, type BridgePlugin, type Producer, type SnapshotOptions } from './session';
 
 /** What a script answers an RPC with: an outcome, or undefined for the fake machine's own default. */
 export type RpcScript = { [N in RpcName]?: (rpc: Rpc<N>, machine: FakeMachine) => RpcOutcome<N> | undefined | Promise<RpcOutcome<N> | undefined> };
@@ -114,7 +125,15 @@ export type FakeMachineOptions = {
 export type RpcRecord = { nonce: string; rpc: RpcName; outcome: RpcOutcome | null; executed: boolean };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const SESSION_RPCS = new Set<RpcName>(['steer', 'interrupt', 'answer', 'decide', 'model', 'compact', 'retire', 'resume', 'stop', 'command']);
+const SESSION_RPCS = new Set<RpcName>(['steer', 'interrupt', 'answer', 'decide', 'model', 'compact', 'retire', 'resume', 'stop', 'command', 'btw', 'stop-agent', 'tell', 'media']);
+
+/** The producer that added each RPC after DC7's: the desk control surface's M0 `command`, the machine-side wave's MW2
+ * `btw`, MW4 `stop-agent` and `tell`, MW5 `media`. */
+const ADDED_IN: Partial<Record<RpcName, Producer>> = { command: 'm0', btw: 'mw2', 'stop-agent': 'mw4', tell: 'mw4', media: 'mw5' };
+/** The RPCs a daemon of `producer`'s knows. */
+const rpcsOf = (producer: Producer): RpcName[] => RPC_NAMES.filter((name) => { const added = ADDED_IN[name]; return added === undefined || producerAtLeast(producer, added); });
+/** An agent's id or name as `stop-agent` and `tell` take it (DX6): 1 to 128 characters, not blank, no control character. */
+const isAgentRef = (ref: unknown): ref is string => typeof ref === 'string' && ref.trim() !== '' && ref.length <= 128 && !hasControl(ref);
 /** Whether text holds a control character, which a command's name may not (DX6 `command`). */
 const hasControl = (text: string) => [...text].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f);
 const fail = (code: RpcError['code'], message: string, extra: Partial<RpcError> = {}): RpcOutcome => ({ state: 'failed', error: { code, message, ...extra } });
@@ -132,6 +151,16 @@ export class FakeMachine {
   readonly rejected: Array<{ event: { writer: string; seq: number } | null; reason: RejectionReason }> = [];
   /** Each RPC received, with its outcome and whether this machine ran its effect. */
   readonly rpcs: RpcRecord[] = [];
+  /** Each rule a scoped allow added (an `mw3` producer): the suggestion the daemon resolved, under the scope's
+   * destination, as the bridge would hand it to the engine (`updatedPermissions`). */
+  readonly scopedAllows: Array<{ session: string; request: string; rule: PermissionUpdate }> = [];
+  /** Each message a `tell` delivered (an `mw4` producer): the agent it went to, by its id, and the text. */
+  readonly told: Array<{ session: string; agentId: string; text: string }> = [];
+  /** Each upload a `media` RPC handed the bridge (an `mw5` producer): its session, the upload (the RPC's nonce), the
+   * directory it was saved in, each file's name there and the name the person gave. */
+  readonly uploads: Array<{ session: string; upload: string; root: string; paths: string[]; names: string[] }> = [];
+  /** A `stop-agent`'s or a `tell`'s agent as its check resolved it, by the RPC's nonce. */
+  private readonly resolvedAgents = new Map<string, string>();
   /** What went wrong without stopping the machine, kept rather than thrown: a POST the hub refused (a stale generation
    * after a drop, say), a replay step that failed. */
   readonly postErrors: Error[] = [];
@@ -181,10 +210,15 @@ export class FakeMachine {
       for (const step of recording.steps) this.timeline.push({ session: depth, step });
     }
     this.timeline.sort((a, b) => a.step.at - b.step.at);
-    // A steer the machine ran before a crash left its row in the transcript, and a stop its TaskStop rows (DX6's trace).
+    // A steer the machine ran before a crash left its row in the transcript, a stop its TaskStop rows, and an agent's stop
+    // the agent stopped and its note (DX6's trace).
     for (const trace of Object.values(this.memory.trace)) {
       if (trace.rpc === 'steer' && trace.row && trace.session) this.sessions.get(trace.session)?.appendRow(null, trace.row as Row);
       else if (trace.rpc === 'stop' && trace.session && typeof trace.result.taskId === 'string') this.sessions.get(trace.session)?.restoreStop(trace.result.taskId);
+      else if (trace.rpc === 'stop-agent' && trace.session && typeof trace.result.agentId === 'string') {
+        const asked = trace.result.agentId;
+        this.sessions.get(trace.session)?.restoreAgentStop(typeof trace.result.resolvedAgentId === 'string' ? trace.result.resolvedAgentId : asked, asked);
+      }
       else if (trace.rpc === 'spawn' && trace.session && !this.sessions.has(trace.session)) this.sessions.set(trace.session, new SessionDepth(trace.session, null, (m) => this.queue({ t: 'session', message: m }), where, true, this.diffBase(trace.session), this.producer, this.plugin));
     }
   }
@@ -272,7 +306,7 @@ export class FakeMachine {
   /** The machine's DX4 `machine` presence. */
   presence(): MachinePresence {
     const checkouts = this.options.checkouts ?? [...new Set([...this.sessions.values()].map((s) => s.cwd).filter((c): c is string => c !== null))].map((path) => ({ path, branch: 'main' }));
-    const desk = producerAtLeast(this.producer, 'm0') ? { desk: { sminos: producerAtLeast(this.producer, 'm1') ? M1_SMINOS : M0_SMINOS, rpcs: [...RPC_NAMES], reads: [] } } : {};
+    const desk = producerAtLeast(this.producer, 'm0') ? { desk: { sminos: sminosOf(this.producer), rpcs: rpcsOf(this.producer), reads: [] } } : {};
     return { online: true, policy: { read_only: this.options.readOnly === true, ceiling: this.options.ceiling ?? 'default' }, checkouts, ...desk };
   }
 
@@ -482,6 +516,36 @@ export class FakeMachine {
   /** The terminal answers a pending request first: settled `terminal`, and a later web decision is refused naming it. */
   async answerInTerminal(request: string, outcome: Settled['outcome'] = 'allow'): Promise<void> {
     await this.settle(request, { winner: 'terminal', outcome, by: 'terminal' });
+  }
+
+  /**
+   * Raises, on `session` (the first replayed one by default), the MW3 live check's permission requests as the bridge
+   * raised them on 2.1.310: three carrying the engine's suggestions (a rule offered for `localSettings`, a directory),
+   * and the one a secrets guard beneath had restored, which carries none. An `mw3` producer's.
+   */
+  async raiseRecordedScoped(session = [...this.sessions.keys()][0]): Promise<Raised[]> {
+    if (!producerAtLeast(this.producer, 'mw3')) throw new Error('the recorded scoped requests are an mw3 producer’s');
+    if (session === undefined || !this.sessions.has(session)) throw new Error(`no session ${session} on ${this.name}`);
+    const drafts = [...MW3_SCOPED.scoped.map((s) => s.raised), MW3_SCOPED.withheld.raised];
+    for (const draft of drafts) await this.raise(session, draft);
+    await this.flush();
+    return drafts.map((d) => this.pending.get(d.request)!.raised);
+  }
+
+  /**
+   * Spawns, on `session` (the first replayed one by default), the MW4 live check's background agent as the bridge's tree
+   * held it: named by its Agent call (`bg-sleeper`), running; `as` gives it another id or name (two agents sharing a
+   * name). An `mw4` producer's.
+   */
+  async spawnRecordedAgent(session = [...this.sessions.keys()][0], as: { agentId?: string; name?: string } = {}): Promise<string> {
+    if (!producerAtLeast(this.producer, 'mw4')) throw new Error('the recorded agent is an mw4 producer’s');
+    if (session === undefined || !this.sessions.has(session)) throw new Error(`no session ${session} on ${this.name}`);
+    const { agentId: recorded, ...rest } = MW4_AGENTS.spawn;
+    const agentId = as.agentId ?? recorded;
+    const spawn = { ...rest, ...(as.name !== undefined && { name: as.name }) };
+    this.sessions.get(session)!.apply({ at: Date.now(), k: 'agent', agentId, spawn });
+    await this.flush();
+    return agentId;
   }
 
   /** The requests pending now. */
@@ -703,9 +767,11 @@ export class FakeMachine {
     if (rpc.project !== this.project) return answer(fail('unknown-project', `${this.name} serves no project ${rpc.project}`));
     if (!(await verifyRpc(this.key, rpc, this.project))) return answer(fail('bad-code', 'the RPC’s code does not verify'));
     if (rpc.machine !== this.name) return answer(fail('wrong-machine', `this is ${this.name}, not ${rpc.machine}`));
-    // A daemon older than the desk control surface's M0 knows no `command`.
-    if (rpc.rpc === 'command' && !producerAtLeast(this.producer, 'm0')) return answer(fail('bad-shape', 'no RPC "command"'));
-    const malformed = argumentProblem(rpc);
+    // A daemon older than the desk control surface's M0 knows no `command`; one older than the machine-side wave's MW2
+    // no `btw`, nor one older than MW4 a `stop-agent` or a `tell`.
+    const addedIn = ADDED_IN[rpc.rpc];
+    if (addedIn && !producerAtLeast(this.producer, addedIn)) return answer(fail('bad-shape', `no RPC ${JSON.stringify(rpc.rpc)}`));
+    const malformed = argumentProblem(rpc) ?? (rpc.rpc === 'decide' && producerAtLeast(this.producer, 'mw3') ? scopeShapeProblem(rpc as Rpc<'decide'>) : null);
     if (malformed) return answer(fail('bad-shape', malformed));
     const session = (rpc.args as { session?: string }).session;
     if (SESSION_RPCS.has(rpc.rpc) && (typeof session !== 'string' || !this.sessions.has(session))) return answer(fail('no-session', `no session ${session} on ${this.name}`));
@@ -726,6 +792,12 @@ export class FakeMachine {
       const held = this.pending.get(rpc.args.digest.request);
       const misfit = held && decisionMisfit(rpc as Rpc<'decide' | 'answer'>, held.raised);
       if (misfit) return answer(misfit);
+      // A scoped allow's rule, resolved from the request held (an `mw3` daemon's; an older one ignores `scope`).
+      const scope = rpc.rpc === 'decide' && producerAtLeast(this.producer, 'mw3') ? rpc.args.scope : undefined;
+      if (held && scope) {
+        const resolved = await scopedRule(held.raised, scope);
+        if ('error' in resolved) return answer(resolved.error);
+      }
     }
     // A stop needs the bridge and a running session, then names a job the session's own jobs index holds as running,
     // or it is refused before the claim, in that order (DC10, the machine half's DX6).
@@ -739,6 +811,28 @@ export class FakeMachine {
       const depth = this.sessions.get(rpc.args.session)!;
       if (this.options.bridge === false || depth.presence === null) return answer(fail('unsupported', 'the session has no bridge, or has ended'));
       if (!depth.capabilities?.ops.includes('command')) return answer(fail('unsupported', "the session's bridge takes no commands: its plugin loaded before the update"));
+    }
+    // So does a side question, from a bridge that takes it.
+    if (rpc.rpc === 'btw') {
+      const depth = this.sessions.get(rpc.args.session)!;
+      if (this.options.bridge === false || depth.presence === null) return answer(fail('unsupported', 'the session has no bridge, or has ended'));
+      if (!depth.capabilities?.ops.includes('btw')) return answer(fail('unsupported', "the session's bridge takes no side questions: its plugin loaded before the update"));
+    }
+    // And an upload, to a bridge that takes it (MW5).
+    if (rpc.rpc === 'media') {
+      const depth = this.sessions.get(rpc.args.session)!;
+      if (this.options.bridge === false || depth.presence === null) return answer(fail('unsupported', 'media needs the session\'s bridge; this session has none, or has ended'));
+      if (!depth.capabilities?.ops.includes('media')) return answer(fail('unsupported', "the session's bridge takes no uploads: its plugin loaded before the update"));
+    }
+    // And one agent stopped or told, from a bridge that takes it, then the agent its tree holds as running (MW4).
+    if (rpc.rpc === 'stop-agent' || rpc.rpc === 'tell') {
+      const depth = this.sessions.get(rpc.args.session)!;
+      if (this.options.bridge === false || depth.presence === null) return answer(fail('unsupported', 'the session has no bridge, or has ended'));
+      if (!depth.capabilities?.ops.includes(rpc.rpc)) return answer(fail('unsupported', "the session's bridge takes no agent's stop or message: its plugin loaded before the update"));
+      const found = depth.resolveAgent(rpc.args.agentId);
+      if ('code' in found) return answer(fail(found.code, found.message));
+      // The id the check resolved is the one the bridge acts on, never a later namesake (the daemon's `resolvedAgentId`).
+      this.resolvedAgents.set(rpc.nonce, found.agent.agentId);
     }
     this.memory.ledger[rpc.nonce] = { rpc: rpc.rpc, session: session ?? null, claimed: Date.now(), outcome: null };
     this.remember();
@@ -777,7 +871,7 @@ export class FakeMachine {
     const member = rpc.member;
     if (this.options.bridge === false) {
       if (rpc.rpc === 'steer') return this.traced(rpc, record, rpc.args.session, { row: null });
-      if (['interrupt', 'decide', 'answer', 'model', 'compact'].includes(rpc.rpc)) return fail('unsupported', 'the session has no bridge');
+      if (['interrupt', 'decide', 'answer', 'model', 'compact', 'btw', 'stop-agent', 'tell', 'media'].includes(rpc.rpc)) return fail('unsupported', 'the session has no bridge');
     }
     switch (rpc.rpc) {
       case 'steer': {
@@ -814,7 +908,11 @@ export class FakeMachine {
           return fail('not-pending', 'the window closed; the terminal answers it', { terminalOnly: true });
         }
         const outcome: Settled['outcome'] = rpc.rpc === 'answer' ? 'answered' : rpc.args.decision;
+        const scope = rpc.rpc === 'decide' && producerAtLeast(this.producer, 'mw3') ? rpc.args.scope : undefined;
+        const resolved = scope ? await scopedRule(raised, scope) : undefined;
+        if (resolved && 'error' in resolved) return resolved.error;
         if (!(await this.settle(digest.request, { winner: 'web', outcome, by: member }))) return notPending();
+        if (resolved) this.scopedAllows.push({ session: raised.session, request: digest.request, rule: resolved.rule });
         return this.traced(rpc, record, raised.session, {});
       }
       case 'model': {
@@ -871,6 +969,45 @@ export class FakeMachine {
         await this.flush();
         return this.traced(rpc, record, depth.id, { taskId: rpc.args.taskId });
       }
+      case 'stop-agent': {
+        // TaskStop on the id the bridge resolved, then the parent's note: the answer is the outcome (no `op` follows),
+        // the spelling asked and, for a name, the id it resolved to, as the MW4 live check recorded them.
+        const depth = this.sessions.get(rpc.args.session)!;
+        const asked = rpc.args.agentId;
+        const id = this.resolvedAgents.get(rpc.nonce)!;
+        if (!depth.stopAgent(id, asked)) return fail('failed', `unknown-agent: agent ${id} is not running`);
+        await this.flush();
+        return this.traced(rpc, record, depth.id, { agentId: asked, accepted: true, ...(id !== asked && { resolvedAgentId: id }) });
+      }
+      case 'tell': {
+        // The engine's send to the agent's id, under the line saying the person wrote it: queued, its answer the outcome.
+        const depth = this.sessions.get(rpc.args.session)!;
+        // The agent the check resolved, while it runs: one that ended since is refused, never its namesake told.
+        const id = this.resolvedAgents.get(rpc.nonce)!;
+        if (!depth.isAgentRunning(id)) return fail('failed', `unknown-agent: agent ${id} is not running`);
+        this.told.push({ session: depth.id, agentId: id, text: rpc.args.text });
+        return this.traced(rpc, record, depth.id, MW4_AGENTS.tell.answer.result as JsonObject);
+      }
+      case 'media': {
+        // Saved under the session's live working directory, held by the bridge, answered `queued`; each attachment is read
+        // at the main loop's next step and passed on, its states following as `op` notices, as the MW5 live check
+        // recorded them (no wake here: the fake runs no turn).
+        const depth = this.sessions.get(rpc.args.session)!;
+        const cwd = depth.status.cwd || depth.cwd || '/';
+        const root = `${cwd.replace(/\/$/, '')}/.claude/desk-uploads/${depth.id}`;
+        const paths = rpc.args.attachments.map((a, n) => `${rpc.nonce}.${n}.${MEDIA_EXTENSIONS[a.mediaType]}`);
+        this.uploads.push({ session: depth.id, upload: rpc.nonce, root, paths, names: rpc.args.attachments.map((a) => a.name) });
+        notices.push(() => this.intake(depth.id, rpc.nonce, paths.length));
+        return this.traced(rpc, record, depth.id, { queued: true, upload: rpc.nonce, intake: 'native-read', root, paths });
+      }
+      case 'btw': {
+        // The bridge answers `started` at once, then the fork's start and end follow as `op` notices: the recorded
+        // answer, whether or not a turn runs (a fork does not wait for the turn).
+        const depth = this.sessions.get(rpc.args.session)!;
+        const id = randomUUID().replaceAll('-', '');
+        notices.push(() => this.sideQuestion(depth.id, rpc.nonce, id));
+        return this.traced(rpc, record, depth.id, { started: true, id });
+      }
       case 'command': {
         // The bridge's route check, then the op answered at once; its start and end follow as `op` notices.
         const depth = this.sessions.get(rpc.args.session)!;
@@ -899,6 +1036,38 @@ export class FakeMachine {
     this.sessions.get(session)?.commandCatalog(plan.name);
     const { title } = plan.outcome;
     if (title !== undefined) await this.write(`rpc:${nonce}:titled`, `${this.name}/${session}`, { kind: 'titled', session, title });
+    await this.flush();
+  }
+
+  /** A side question's `op` start and end, as the daemon relays the bridge's `btw` events: the recorded ones, under
+   * this op's id and the RPC's nonce. */
+  private async sideQuestion(session: string, nonce: string, id: string): Promise<void> {
+    const base = { project: this.project, machine: this.name, session, kind: 'op', sub: null, n: null } as const;
+    for (const event of MW2_BTW.events) {
+      // The event's own `type` and `rpc` (the child's) give way to the op's: DX4 `op` names the RPC's nonce.
+      const fields = Object.fromEntries(Object.entries(event).filter(([k]) => k !== 'type' && k !== 'rpc' && k !== 'phase'));
+      this.sendSessionWide({ ...base, body: { rpc: nonce, op: 'btw', phase: event.phase as OpBody['phase'], ...fields, id, t: Date.now() } });
+    }
+    await this.flush();
+  }
+
+  /**
+   * An upload's states as `op` notices, in the order the MW5 live check recorded them: each attachment `read`, then each
+   * `forwarded`, the last one's `phase: 'end'`; `attachments` the whole upload as it stands, each with its own tool-use id.
+   */
+  private async intake(session: string, upload: string, count: number): Promise<void> {
+    const base = { project: this.project, machine: this.name, session, kind: 'op', sub: null, n: null } as const;
+    const ids = Array.from({ length: count }, () => `toolu_sminos_${randomUUID().replaceAll('-', '').slice(0, 24)}`);
+    const states: MediaState[] = Array.from({ length: count }, () => 'pending');
+    for (const to of ['read', 'forwarded'] as const) {
+      for (let index = 0; index < count; index++) {
+        states[index] = to;
+        const attachments = states.map((state, i) => ({ index: i, state, ...(state !== 'pending' && { toolUseId: ids[i] }) }));
+        const phase = states.every((state) => state === 'forwarded') ? 'end' : 'start';
+        const body: MediaOpBody = { rpc: upload, op: 'media', id: upload, upload, index, state: to, phase, toolUseId: ids[index], attachments, t: Date.now() };
+        this.sendSessionWide({ ...base, body: body as unknown as OpBody });
+      }
+    }
     await this.flush();
   }
 
@@ -968,7 +1137,7 @@ export class FakeMachine {
         this.sessions.get(frame.session)?.output(frame.sub, frame.taskId, frame.tail);
         return;
       case 'read':
-        this.sessions.get(frame.session)?.read(frame.sub, frame.id, frame.what);
+        this.sessions.get(frame.session)?.read(frame.sub, frame.id, frame.what, frame.args);
         return;
       default:
         return;
@@ -1028,8 +1197,15 @@ function argumentProblem(rpc: Rpc): string | null {
   switch (rpc.rpc) {
     case 'steer':
       return needs(str('session') && str('text'), '{session, text}');
-    case 'interrupt':
     case 'compact':
+      return needs(str('session') && optStr('instructions') && (a.instructions === undefined || [...(a.instructions as string)].length <= 4096), '{session, instructions?: at most 4,096 characters}');
+    case 'media':
+      return mediaProblem(a);
+    case 'btw': {
+      const prompt = a.prompt;
+      return needs(str('session') && typeof prompt === 'string' && prompt.trim() !== '' && [...prompt].length <= 8192, "{session, prompt}, prompt the question's text, at most 8,192 characters");
+    }
+    case 'interrupt':
     case 'retire':
     case 'resume':
       return needs(str('session'), '{session}');
@@ -1047,6 +1223,10 @@ function argumentProblem(rpc: Rpc): string | null {
       return needs(str('session') && optStr('model') && optStr('effort') && (a.model !== undefined || a.effort !== undefined), '{session, model?, effort?} with at least one');
     case 'stop':
       return needs(str('session') && isTaskId(a.taskId), '{session, taskId}, taskId as the engine spells it');
+    case 'stop-agent':
+      return needs(str('session') && isAgentRef(a.agentId), "{session, agentId}, agentId an agent's id or name: 1 to 128 characters, not blank, no control character");
+    case 'tell':
+      return needs(str('session') && isAgentRef(a.agentId) && typeof a.text === 'string' && a.text.trim() !== '', "{session, agentId, text}, agentId as stop-agent's, text not blank");
     case 'spawn':
       return needs(str('checkout') && str('brief') && ['worktree', 'model', 'effort', 'permission_mode'].every(optStr), '{checkout, brief, worktree?, model?, effort?, permission_mode?}');
     case 'command': {
@@ -1059,10 +1239,76 @@ function argumentProblem(rpc: Rpc): string | null {
   }
 }
 
+/** Each media type's stored extension (the daemon's `sminos_media.TYPES`). */
+const MEDIA_EXTENSIONS: Record<MediaType, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'application/pdf': 'pdf' };
+
+/** The media type the bytes' signature names, or null (the daemon's `sminos_media.type_of`). */
+function mediaTypeOf(b: Buffer): MediaType | null {
+  const starts = (sig: number[] | string, at = 0) => (typeof sig === 'string' ? Buffer.from(sig, 'latin1') : Buffer.from(sig)).equals(b.subarray(at, at + sig.length));
+  if (starts([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return 'image/png';
+  if (starts([0xff, 0xd8, 0xff])) return 'image/jpeg';
+  if (starts('GIF87a') || starts('GIF89a')) return 'image/gif';
+  if (b.length >= 12 && starts('RIFF') && starts('WEBP', 8)) return 'image/webp';
+  if (starts('%PDF-')) return 'application/pdf';
+  return null;
+}
+
+/** What is wrong with a `media` RPC's arguments, or null, as the daemon's `shape()` checks them (DX6 `media`). */
+function mediaProblem(a: Record<string, unknown>): string | null {
+  if ('text' in a) return 'media: the words go as a Send, not with the upload';
+  if (a.delivery !== 'queued-turn') return 'media: delivery is queued-turn';
+  const files = a.attachments;
+  if (!Array.isArray(files) || files.length < 1 || files.length > 4) return 'media: attachments is a list of 1-4 files';
+  for (const [i, f] of files.entries()) {
+    const file = f as Record<string, unknown> | null;
+    if (typeof file !== 'object' || file === null || Array.isArray(file)) return `media: attachment ${i} is {name, mediaType, data}`;
+    if (typeof file.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(file.name)) return `media: attachment ${i}'s name is [A-Za-z0-9][A-Za-z0-9._-]{0,127}`;
+    if (!(MEDIA_TYPES as readonly string[]).includes(file.mediaType as string)) return `media: attachment ${i}'s mediaType is one of ${MEDIA_TYPES.join(', ')}`;
+    const data = typeof file.data === 'string' ? file.data : '';
+    const bytes = Buffer.from(data, 'base64');
+    if (data === '' || bytes.length === 0 || bytes.toString('base64') !== data) return `media: attachment ${i}'s data is base64 bytes`;
+    if (mediaTypeOf(bytes) !== file.mediaType) return `media: attachment ${i}'s bytes are not ${file.mediaType as string}`;
+  }
+  return null;
+}
+
 /** The ask mod's tool as each plugin it has run in registers it (doperpowers' sminos plugin design, §11). */
 const ASK_TOOL_IN: Record<BridgePlugin, string> = { doperpowers: 'mcp__doperpowers__AskUserQuestion', sminos: 'mcp__sminos__AskUserQuestion' };
 const OLD_ASK_TOOL = ASK_TOOL_IN.doperpowers;
 const QUESTION_TOOLS = new Set(['AskUserQuestion', ...Object.values(ASK_TOOL_IN)]);
+
+/** The suggestions a scoped allow takes, and the destinations it may name (the desk control surface spec, §7, §11). */
+const SCOPED_TYPES = new Set(['addRules', 'addDirectories']);
+const SCOPE_DESTINATIONS = new Set(['session', 'localSettings']);
+
+/** A `decide`'s `scope`, as the daemon's `shape()` checks it before anything runs; null when it has none or it fits. */
+function scopeShapeProblem(rpc: Rpc<'decide'>): string | null {
+  const scope = (rpc.args as { scope?: unknown }).scope;
+  if (scope === undefined) return null;
+  if (rpc.args.decision !== 'allow') return 'decide: a scope goes with an allow';
+  const s = scope as Record<string, unknown> | null;
+  if (typeof s !== 'object' || s === null || Array.isArray(s) || !Number.isInteger(s.suggestion) || (s.suggestion as number) < 0) return "decide: scope.suggestion is the index of one of the request's suggestions";
+  if (typeof s.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(s.sha256)) return "decide: scope.sha256 is the lowercase hex SHA-256 of that suggestion's canonical JSON";
+  if (!SCOPE_DESTINATIONS.has(s.destination as string)) return 'decide: scope.destination is session or localSettings: the terminal changes any other settings';
+  return null;
+}
+
+/**
+ * A scoped allow's rule, from the request held, never the browser (sminos_rpc.py's `scoped_rule`): the suggestion at
+ * the index, its hash the one the browser drew (else `not-pending`, the suggestions changed), a rule or a directory,
+ * under `session` or its own `localSettings` (else `bad-shape`).
+ */
+async function scopedRule(raised: Raised, scope: NonNullable<Rpc<'decide'>['args']['scope']>): Promise<{ rule: PermissionUpdate } | { error: RpcOutcome }> {
+  const suggestion = raised.suggestions?.[scope.suggestion];
+  if (!suggestion || (await inputSha256(suggestion as unknown as JsonObject)) !== scope.sha256) {
+    return { error: fail('not-pending', 'the suggestions changed: the request no longer offers the one shown') };
+  }
+  if (!SCOPED_TYPES.has(suggestion.type)) return { error: fail('bad-shape', `decide: a scope takes a rule or a directory the engine suggested (addRules, addDirectories), not ${suggestion.type}`) };
+  if (scope.destination === 'localSettings' && suggestion.destination !== 'localSettings') {
+    return { error: fail('bad-shape', `decide: localSettings only where the engine suggested it; this suggestion is for ${suggestion.destination}`) };
+  }
+  return { rule: { ...suggestion, destination: scope.destination } };
+}
 
 /**
  * Whether a decision or an answer fits the request it names, as the bridge's decision route checks it (DX5): a question

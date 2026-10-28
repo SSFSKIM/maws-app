@@ -9,10 +9,10 @@ import { join } from 'node:path';
 import { expect, type TestInfo } from '@playwright/test';
 import type { CommandInput, CommandName, CommandOutput } from '@shared/ipc/schema';
 import { HostResponseSchema, type HostResponse } from '@shared/ipc/host-protocol';
-import { wireFingerprint } from '@shared/ipc/wire-fingerprint';
+import { WIRE_MINOR } from '@shared/ipc/wire';
 import { validateCommandOutput } from '@shared/ipc/validate';
 import { SOCKET_PROTOCOL, splitLines } from '@shared/host/socket-protocol';
-import { SETTINGS_DEFAULTS_V18 } from '@shared/settings/defaults';
+import { SETTINGS_DEFAULTS_V19 } from '@shared/settings/defaults';
 import { probeLayout, readLog, startHttpFixture } from './connector-direct-probe';
 import { shellQuoted } from './connector-direct-checks';
 import { invoke, value } from './connector-scene';
@@ -44,7 +44,7 @@ async function connectHost(userData: string, lock: Lock) {
   try {
     await once(socket, 'connect');
     const token = readFileSync(join(userData, 'supervisor', 'host.token'), 'utf8').trim();
-    socket.write(`${JSON.stringify({ t: 'hello', protocol: SOCKET_PROTOCOL, token, buildId: lock.buildId, wire: wireFingerprint(), appPid: process.pid })}\n`);
+    socket.write(`${JSON.stringify({ t: 'hello', protocol: SOCKET_PROTOCOL, token, minor: WIRE_MINOR, build: lock.buildId, capabilities: [], appPid: process.pid })}\n`);
     await expect.poll(() => { if (fault) throw new Error(fault); return welcome; }, { timeout: 10_000, message: 'the cold built host welcomes the scratch client' }).toMatchObject({ liveSessions: 0, rows: 0 });
     socket.write(`${JSON.stringify({ t: 'ready' })}\n`);
   } catch (error) {
@@ -95,7 +95,7 @@ export async function coldHttpDelivery(info: TestInfo): Promise<void> {
         writeFileSync(join(claudeConfigDir, '.claude.json'), JSON.stringify({ mcpServers: {} }));
         writeFileSync(join(layout.config, '.claude.json'), JSON.stringify({ mcpServers: { 'cold-user': { type: 'http', url: user.url } } }));
         appendFileSync(join(shellHome, '.zprofile'), `export CLAUDE_CONFIG_DIR=${shellQuoted(layout.config)}\n`);
-        writeFileSync(join(userData, 'settings.json'), JSON.stringify({ ...SETTINGS_DEFAULTS_V18, engine: { ...SETTINGS_DEFAULTS_V18.engine, mcpServers: [{ name: 'cold-app', type: 'http', url: app.url }] } }));
+        writeFileSync(join(userData, 'settings.json'), JSON.stringify({ ...SETTINGS_DEFAULTS_V19, engine: { ...SETTINGS_DEFAULTS_V19.engine, mcpServers: [{ name: 'cold-app', type: 'http', url: app.url }] } }));
       },
     });
     child = maws.app.process();

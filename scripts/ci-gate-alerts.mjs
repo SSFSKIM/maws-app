@@ -8,12 +8,16 @@
 // where each job goes, and a job can take the guest only on the labels the guest carries (ci-kit-mac-solo, ci-kit-mac-vm, or
 // the trial slot's ci-kit-mac-vm-trial). A run with any other Mac job, a host job (packaged, the plan job, a class 1a job, a
 // job on the exclusive instance's or the shared instances' labels), needs a host free of alerts, for the guest cannot take
-// that job and the host's alert would refuse it. Whatever keeps that plan from running (no tree, a refusal, a workflow the
-// reader does not know) leaves the run needing a host; only a failed GitHub read goes ahead with a warning, since the
-// runner's own check still refuses.
+// that job and the host's alert would refuse it. A hosted e2e group is a waiter on the pool, so a hosted-only run has no
+// Mac jobs and goes ahead past any alert. While an alert is open, a home job (labels include ci-kit-mac-home) needs an
+// online runner carrying that label on an unalerted machine; another free host cannot take it. With no alerts, home jobs
+// go ahead and queue like other jobs, even if the home runner is offline.
+// The run's Mac jobs are the tested plan's when it runs. If it cannot run, the flags name the Mac jobs and no home job
+// is known; a failed GitHub read goes ahead with a warning, since the runner's own check still refuses.
 // Usage: node scripts/ci-gate-alerts.mjs --gates <list> --runner <lane> --class1a <runner> --lane <lane> --live <yes>
-// --git-dir <dir> --sha <commit>, ci-gate.sh's own values (empty when not given; its `--gates all` comes as empty, the
-// default set; the directory and the commit are the tested tree). Prints its lines on stdout and exits 2
+// --trailers <lines> --git-dir <dir> --sha <commit>, ci-gate.sh's own values (empty when not given; its `--gates all` comes
+// as empty, the default set; `--trailers` its peer's, ci-gate-peer.mjs's lines; the directory and the commit are the
+// tested tree). Prints its lines on stdout and exits 2
 // when the run is not to be pushed, else 0. The parsing and the decision are exported for scripts/ci-gate-alerts.test.mjs.
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
@@ -31,6 +35,8 @@ const ALERT = /^ci-kit alert: ([a-z0-9-]+): (\S+) since (\S+)(?: \((.*)\))?/;
 // macOS guest, `ci-kit-mac-<machine>-vm` (`-vm-trial` its trial slot), has a desktop of its own, so it is a machine of
 // its own, `<machine>-vm`, and opens no alert.
 const MAC_RUNNER = /^ci-kit-mac-(.+?)(?:-\d+)?$/;
+// The label of the plan's home Mac jobs, carried by the mini's exclusive instance alone (gate-plan.mjs's macHome).
+const HOME = 'ci-kit-mac-home';
 const words = (text = '') => text.split(/[\s,]+/).filter(Boolean);
 // What a folded machine is: `vm-trial` for the trial slot's identity (`<machine>-vm-trial`, which carries the one label
 // ci-kit-mac-vm-trial), `vm` for a guest (`<machine>-vm…`, which carries ci-kit-mac-solo and ci-kit-mac-vm), else null, a host.
@@ -70,19 +76,38 @@ export function macJobs({ gates = '', runner = '', class1a = '', variables = {},
 }
 
 // Whether the run goes ahead, and what to print: `alerts` the parsed open alerts (each with its issue `number`),
-// `runners` MAWS's self-hosted runners as { name, status }, `guest` the guest the run's Mac jobs can all run in (guestRun):
-// `vm` (a guest that carries ci-kit-mac-solo or ci-kit-mac-vm), `vm-trial` (the trial slot's), or null, a run that needs a host.
-export function decide({ jobs, alerts, runners, guest = null }) {
+// `runners` MAWS's self-hosted runners as { name, status, labels }, `guest` the guest the run's Mac jobs can all run in
+// (macPlan): `vm` (a guest that carries ci-kit-mac-solo or ci-kit-mac-vm), `vm-trial` (the trial slot's), or null, a run
+// that needs a host; `home` the run's jobs on the ci-kit-mac-home label (macPlan), which only a runner carrying it takes.
+export function decide({ jobs, alerts, runners, guest = null, home = [] }) {
   if (jobs.length === 0 || alerts.length === 0) return { stop: false, lines: [] };
   const blocked = [...new Set(alerts.map((alert) => alert.machine))];
-  const machines = [
-    ...new Set(
-      runners
-        .filter((runner) => runner.status === 'online')
-        .map((runner) => MAC_RUNNER.exec(runner.name)?.[1])
-        .filter((machine) => machine !== undefined && !blocked.includes(machine)),
-    ),
-  ];
+  const machineOf = (runner) => MAC_RUNNER.exec(runner.name)?.[1];
+  const online = runners.filter((runner) => runner.status === 'online');
+  const machines = [...new Set(online.map(machineOf).filter((machine) => machine !== undefined && !blocked.includes(machine)))];
+  if (home.length > 0) {
+    const homes = runners.filter((runner) => runner.labels.includes(HOME));
+    const homeMachines = [...new Set(homes.map(machineOf).filter((machine) => machine !== undefined))];
+    if (!homes.some((runner) => runner.status === 'online' && machines.includes(machineOf(runner)))) {
+      const homeAlerts = alerts.filter((alert) => homeMachines.includes(alert.machine));
+      const others = machines.filter((machine) => !homeMachines.includes(machine));
+      return {
+        stop: true,
+        lines: [
+          `ci-gate: not pushing: this run puts jobs on the home Mac (${list(home)}), which only a runner labelled ${HOME} takes, and no such runner is online on a machine free of an open ci-kit alert:`,
+          ...(homeMachines.length === 0 ? [`  no runner of ${REPO} carries ${HOME}`] : []),
+          ...homeMachines.flatMap((machine) => {
+            const own = homeAlerts.filter((alert) => alert.machine === machine);
+            return own.length > 0 ? own.map((alert) => `  ${alertLine(alert)}`) : [`  ${machine}: no ${HOME} runner online`];
+          }),
+          ...(others.length > 0 ? [`ci-gate: ${list(others)} ${others.length === 1 ? 'is online and free of alerts, but carries' : 'are online and free of alerts, but carry'} no ${HOME}, so ${others.length === 1 ? 'it does' : 'they do'} not take these jobs`] : []),
+          homeAlerts.length > 0
+            ? `ci-gate: rerun once the alert closes: ${homeAlerts.map((alert) => `https://github.com/${ALERTS}/issues/${alert.number}`).join(' ')}`
+            : `ci-gate: rerun once a runner carrying ${HOME} is online`,
+        ],
+      };
+    }
+  }
   const free = machines.filter((machine) => guestOf(machine) === null || guestOf(machine) === guest);
   const guests = machines.filter((machine) => guestOf(machine) !== null);
   if (free.length > 0) return { stop: false, lines: [`ci-gate: ci-kit alert open on ${list(blocked)}; going ahead on ${list(free)}`] };
@@ -132,8 +157,8 @@ export function workflowEnv(workflow) {
 
 // What a runs-on label set (the JSON the plan writes) is to a guest: `vm` for [ci-kit-mac-solo] or [ci-kit-mac-vm] (the
 // guest carries both), `vm-trial` for [ci-kit-mac-vm-trial] (the trial slot's identity alone), `other` for what needs no Mac
-// (hosted Linux, the pool), and `host` for anything else, which includes the exclusive instance's labels, the shared
-// instances' [ci-kit-mac-shared] and every label set not known here.
+// (hosted Linux, the pool), and `host` for anything else, which includes the exclusive instances' labels (including
+// ci-kit-mac-home), the shared instances' [ci-kit-mac-shared] and every label set not known here.
 export function runsOn(json) {
   const labels = JSON.parse(json);
   if (typeof labels === 'string') return /^ubuntu-[\d.]+$|^ubuntu-slim$/.test(labels) ? 'other' : 'host';
@@ -144,20 +169,21 @@ export function runsOn(json) {
   return 'host';
 }
 
-// The guest a run's Mac jobs can all run in, from the tested commit's own plan: `vm`, `vm-trial`, or null when any job needs
-// a host, no job takes a guest, the plan refuses the run, or anything cannot be read. The commit's .github/scripts,
-// .github/workflows/gate.yml and package.json are extracted from `sha` in `gitDir` to a temporary directory, and its
-// gate-plan.mjs runs there as the plan job runs it: gate.yml's env, the repository variables, and the trailers ci-gate.sh
-// pushes (`gates`, `runner`, `class1a`, `lane`, `live`).
-export function guestRun({ gitDir, sha, gates = '', runner = '', class1a = '', lane = '', live = '', variables = {} }) {
-  if (!gitDir || !sha || (variables.GATE_RUNNER ?? '').toLowerCase() === 'macos') return null; // the plan job itself is on the host
+// The tested plan's Mac jobs, their guest eligibility and home-only jobs: { jobs, guest, home }. `guest` is `none`
+// for no Mac jobs, `vm` or `vm-trial` when every Mac job can run there, otherwise null. `home` names jobs on ci-kit-mac-home.
+// The plan job itself is included under GATE_RUNNER=macos. A missing tree, refusal or unreadable plan returns null.
+// Extract the commit's planner, workflow and package scripts, then run with its env and ci-gate.sh's trailers.
+export function macPlan({ gitDir, sha, gates = '', runner = '', class1a = '', lane = '', live = '', trailers: more = '', variables = {} }) {
+  if (!gitDir || !sha) return null;
   let dir;
   try {
     dir = mkdtempSync(join(tmpdir(), 'maws-ci-gate-alerts-'));
     const top = execFileSync('git', ['-C', gitDir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-    const archive = execFileSync('git', ['-C', top, 'archive', '--format=tar', sha, '--', '.github/scripts', '.github/workflows/gate.yml', 'package.json'], { maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-    execFileSync('tar', ['-x', '-C', dir], { input: archive, stdio: ['pipe', 'pipe', 'pipe'] });
-    const trailers = Object.entries({ Gates: gates, Runner: runner, Class1a: class1a, Lane: lane, Live: live }).filter(([, value]) => value).map(([key, value]) => `${key}: ${value}`);
+    // bsdtar may exit before consuming git archive's padding; a file avoids EPIPE on its stdin.
+    const archive = join(dir, 'archive.tar');
+    execFileSync('git', ['-C', top, 'archive', '--format=tar', `--output=${archive}`, sha, '--', '.github/scripts', '.github/workflows/gate.yml', 'package.json'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    execFileSync('tar', ['-x', '-f', archive, '-C', dir], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const trailers = [...Object.entries({ Gates: gates, Runner: runner, Class1a: class1a, Lane: lane, Live: live }).filter(([, value]) => value).map(([key, value]) => `${key}: ${value}`), ...more.split('\n').filter(Boolean)];
     const output = join(dir, 'github-output');
     execFileSync(process.execPath, ['.github/scripts/gate-plan.mjs'], {
       cwd: dir,
@@ -175,14 +201,20 @@ export function guestRun({ gitDir, sha, gates = '', runner = '', class1a = '', l
       },
     });
     const out = Object.fromEntries(readFileSync(output, 'utf8').trim().split('\n').map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
-    const kinds = [
-      ...(out.packaged === 'true' ? ['host'] : []), // packaged is always on the exclusive instance (gate.yml)
-      ...['static', 'unit', 'probes'].filter((gate) => out[gate] === 'true').map((gate) => runsOn(out[`${gate}_runner`])),
-      ...(out.unit_darwin === 'true' ? [runsOn(out.unit_darwin_runner)] : []),
-      ...JSON.parse(out.e2e).map((entry) => runsOn(entry.runner)),
-    ].filter((kind) => kind !== 'other');
-    const guests = new Set(kinds);
-    return guests.size === 1 && !guests.has('host') ? kinds[0] : null;
+    // Keep labels until both host/guest classification and the home-only requirement have been read.
+    const placed = [
+      ...((variables.GATE_RUNNER ?? '').toLowerCase() === 'macos' ? [['plan', '["self-hosted","macOS","ARM64"]']] : []),
+      ...(out.packaged === 'true' ? [['packaged', '["self-hosted","macOS","ARM64"]']] : []),
+      ...['static', 'unit', 'probes'].filter((gate) => out[gate] === 'true').map((gate) => [gate, out[`${gate}_runner`]]),
+      ...(out.unit_darwin === 'true' ? [['unit:darwin', out.unit_darwin_runner]] : []),
+      ...JSON.parse(out.e2e).map((entry) => [`e2e:${entry.group}`, entry.runner]),
+    ].filter(([, json]) => runsOn(json) !== 'other');
+    const kinds = new Set(placed.map(([, json]) => runsOn(json)));
+    return {
+      jobs: placed.map(([name]) => name),
+      guest: placed.length === 0 ? 'none' : kinds.size === 1 && !kinds.has('host') ? [...kinds][0] : null,
+      home: placed.filter(([, json]) => [JSON.parse(json)].flat().includes(HOME)).map(([name]) => name),
+    };
   } catch {
     return null;
   } finally {
@@ -194,8 +226,12 @@ export function guestRun({ gitDir, sha, gates = '', runner = '', class1a = '', l
   }
 }
 
+// The guest a run's Mac jobs can all run in (macPlan): `vm`, `vm-trial`, `none` when the plan puts no job on a Mac, or null
+// when a job needs a host or the plan cannot be run.
+export const guestRun = (run) => macPlan(run)?.guest ?? null;
+
 // The reads, through `gh` (args to stdout, throwing on failure), and the decision; any failed read goes ahead with a warning.
-export function check({ gates, runner, class1a, lane, live, gitDir, sha, offMac, gh }) {
+export function check({ gates, runner, class1a, lane, live, trailers, gitDir, sha, offMac, gh }) {
   const read = (path, jq) =>
     gh(['api', '--paginate', path, '--jq', jq])
       .split('\n')
@@ -204,7 +240,10 @@ export function check({ gates, runner, class1a, lane, live, gitDir, sha, offMac,
   let step = "the repository's variables";
   try {
     const variables = Object.fromEntries(read(`repos/${REPO}/actions/variables?per_page=30`, '.variables[] | [.name, .value]'));
-    const jobs = macJobs({ gates, runner, class1a, variables, offMac });
+    // The Mac jobs are the tested commit's plan's (a hosted group is on none), whose lists may differ from this checkout's;
+    // those the flags and this checkout's POOL_E2E name only when that plan cannot be run.
+    const placed = macPlan({ gitDir, sha, gates, runner, class1a, lane, live, trailers, variables });
+    const jobs = placed ? placed.jobs : macJobs({ gates, runner, class1a, variables, offMac });
     if (jobs.length === 0) return { stop: false, lines: [] };
     step = `the open ci-kit alerts (${ALERTS})`;
     const alerts = read(`repos/${ALERTS}/issues?labels=ci-kit-alert&state=open&per_page=100`, '.[] | select(.pull_request == null) | {number, title}')
@@ -215,8 +254,8 @@ export function check({ gates, runner, class1a, lane, live, gitDir, sha, offMac,
       .filter(Boolean);
     if (alerts.length === 0) return { stop: false, lines: [] };
     step = `${REPO}'s runners`;
-    const runners = read(`repos/${REPO}/actions/runners?per_page=100`, '.runners[] | {name, status}');
-    return decide({ jobs, alerts, runners, guest: guestRun({ gitDir, sha, gates, runner, class1a, lane, live, variables }) });
+    const runners = read(`repos/${REPO}/actions/runners?per_page=100`, '.runners[] | {name, status, labels: [.labels[].name]}');
+    return decide({ jobs, alerts, runners, guest: placed?.guest ?? null, home: placed?.home ?? [] });
   } catch (error) {
     const reason = String(error.stderr ?? '').split('\n').find((line) => line.trim()) ?? error.message;
     return { stop: false, lines: [`ci-gate: warning: could not read ${step} (${reason.trim()}); going ahead without the ci-kit alert check (the runner's job-started check still refuses jobs under a dialog)`] };
@@ -225,7 +264,7 @@ export function check({ gates, runner, class1a, lane, live, gitDir, sha, offMac,
 
 // realpath: node resolves argv[1] but not its symlinks (a worktree under /tmp), while import.meta.url is the real path.
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const { values } = parseArgs({ options: { gates: { type: 'string', default: '' }, runner: { type: 'string', default: '' }, class1a: { type: 'string', default: '' }, lane: { type: 'string', default: '' }, live: { type: 'string', default: '' }, 'git-dir': { type: 'string', default: '' }, sha: { type: 'string', default: '' } } });
+  const { values } = parseArgs({ options: { gates: { type: 'string', default: '' }, runner: { type: 'string', default: '' }, class1a: { type: 'string', default: '' }, lane: { type: 'string', default: '' }, live: { type: 'string', default: '' }, trailers: { type: 'string', default: '' }, 'git-dir': { type: 'string', default: '' }, sha: { type: 'string', default: '' } } });
   const gh = (args) => execFileSync('gh', args, { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] });
   const offMac = poolE2e(readFileSync(new URL('../.github/workflows/gate.yml', import.meta.url), 'utf8'));
   const { stop, lines } = check({ ...values, gitDir: values['git-dir'], offMac, gh });

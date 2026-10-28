@@ -10,9 +10,11 @@
     "types": ["@cloudflare/workers-types"],
     "strict": true,
     "isolatedModules": true,
+    // The protocol package (apps/org-protocol) imports with `.ts` extensions, so Node loads it unbundled.
+    "allowImportingTsExtensions": true,
     "noEmit": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts", "test/support/worker-under-test.ts", "test/support/send-fault.ts", "test/machine-end.test.ts", "test/op-store.test.ts"]
+  "include": ["src/**/*.ts", "test/support/worker-under-test.ts", "test/support/send-fault.ts", "test/machine-end.test.ts", "test/op-store.test.ts", "test/org-chain.test.ts"]
 }

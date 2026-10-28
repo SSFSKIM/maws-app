@@ -84,6 +84,13 @@ export const results: { [N in keyof RpcResults]: RpcResults[N] } = {
   stop: { taskId: 'b7k2m9q4x' },
   // Answered at once; the outcome follows as `op`.
   command: { queued: true, route: 'run', id: 'cmd-1' },
+  // Started at once; the answer follows as `op`.
+  btw: { started: true, id: 'b1' },
+  // The answer is the outcome: a name answered with the id it resolved to, an id alone; no `op` follows.
+  'stop-agent': { agentId: 'bg-sleeper', accepted: true, resolvedAgentId: 'a7a362db27418152f' },
+  tell: { sent: true },
+  // Answered once the bridge holds the upload; each attachment's state follows as `op`.
+  media: { queued: true, upload: 'hXa9Nm6s5JfNqGzwKtg70A', intake: 'native-read', root: '/w/.claude/desk-uploads/s', paths: ['hXa9Nm6s5JfNqGzwKtg70A.0.png'] },
 };
 
 export const outcomes: RpcOutcome<'interrupt' | 'steer'>[] = [
@@ -118,7 +125,7 @@ export const browserDown: ProjectDown[] = [
 describe("DX2's and DX3's frames", () => {
   it('are pinned by their types', () => {
     expect(up.length + down.length + browserUp.length + browserDown.length).toBe(38);
-    expect(Object.keys(results)).toHaveLength(11);
+    expect(Object.keys(results)).toHaveLength(15);
     expect(outcomes).toHaveLength(8);
   });
 });

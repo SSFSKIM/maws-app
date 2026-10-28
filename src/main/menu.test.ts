@@ -1,8 +1,10 @@
+import { EventEmitter } from 'node:events';
 import type { MenuItemConstructorOptions } from 'electron';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clientOf } from './ipc/clients';
 import type { Settings } from '@shared/ipc/schema';
 import { ACTIONS, ACTION_IDS, type ActionId } from '@shared/keymap/actions';
-import { SETTINGS_DEFAULTS_V18 } from '@shared/settings/defaults';
+import { SETTINGS_DEFAULTS_V19 } from '@shared/settings/defaults';
 
 interface Contents {
   id: number;
@@ -18,7 +20,7 @@ const electron = vi.hoisted(() => ({
   setApplicationMenu: vi.fn(),
   windows: [] as { webContents: Contents; contentView?: { children: { webContents?: Contents }[] } }[],
   focused: null as Contents | null,
-  handlers: new Map<string, (input: unknown, context: { sender: unknown }) => unknown>(), // P4-B2 K6: main's handlers
+  handlers: new Map<string, (input: unknown, context: { client: unknown }) => unknown>(), // P4-B2 K6: main's handlers
 }));
 vi.mock('./windows', () => ({ appWindows: () => electron.windows })); // E2: the app-window registry Select All reads
 vi.mock('electron', () => ({
@@ -33,7 +35,7 @@ const { menuTemplate, registerMenuHandlers, startMenu } = await import('./menu')
 const { eventChannel } = await import('@shared/ipc/schema'); // P4-B2 K6
 
 type Item = MenuItemConstructorOptions;
-const SETTINGS: Settings = SETTINGS_DEFAULTS_V18;
+const SETTINGS: Settings = SETTINGS_DEFAULTS_V19;
 const ALL = new Set<ActionId>(ACTION_IDS);
 const MENU_SINK = ACTION_IDS.filter((id) => ACTIONS[id].sink === 'menu');
 
@@ -241,10 +243,14 @@ describe('Edit ▸ Undo and Redo', () => {
 
   it('layout.nativeEdit runs the native command in the page that asked (no editor of its own claimed the op)', () => {
     registerMenuHandlers({ setEnabled: vi.fn(), stop: vi.fn() });
-    const page = contents(1);
+    const page = Object.assign(new EventEmitter(), contents(1));
     const nativeEdit = electron.handlers.get('layout.nativeEdit')!;
-    nativeEdit({ op: 'undo' }, { sender: page });
-    nativeEdit({ op: 'redo' }, { sender: page });
+    nativeEdit({ op: 'undo' }, { client: clientOf(page as never) });
+    nativeEdit({ op: 'redo' }, { client: clientOf(page as never) });
+    expect(calls(page.undo, page.redo)).toEqual([1, 1]);
+    page.isDestroyed = () => true;
+    page.emit('destroyed'); // a page gone by the time its op arrives runs nothing
+    nativeEdit({ op: 'undo' }, { client: clientOf(page as never) });
     expect(calls(page.undo, page.redo)).toEqual([1, 1]);
   });
 });

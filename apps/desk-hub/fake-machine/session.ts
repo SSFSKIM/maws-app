@@ -23,7 +23,18 @@ import { join, posix } from 'node:path';
 import { isOutputTail, isTaskId } from '../src/protocol/browser';
 import type { JsonObject } from '../src/protocol/json';
 import { loadRoutes } from './routes';
-import type { Catalog, Capabilities, Job, ReadAnswer, SessionBodies, SessionMessage, SessionPresence, StatusRead, Streaming, StreamingBlock, SubagentMeta, SubscriptionKind, Usage } from '../src/protocol/session';
+// The MW1 live check's recording (dx4/README.md): imported, as the route table is, for the bundled command.
+import mw1 from './dx4/mw1-reads.json' with { type: 'json' };
+// And MW2's (dx4/README.md).
+import mw2 from './dx4/mw2-ops.json' with { type: 'json' };
+// And MW3's (dx4/README.md).
+import mw3 from './dx4/mw3-scoped.json' with { type: 'json' };
+// And MW4's (dx4/README.md).
+import mw4 from './dx4/mw4-agents.json' with { type: 'json' };
+// And MW5's (dx4/README.md).
+import mw5 from './dx4/mw5-media.json' with { type: 'json' };
+import type { Catalog, Capabilities, ConfigRead, MediaOpBody, ControlCapabilities, McpRead, PermissionUpdate, SettingsRead, UsageRead, Job, ReadAnswer, SessionBodies, SessionMessage, SessionPresence, StatusRead, Streaming, StreamingBlock, SubagentMeta, SubscriptionKind, Usage } from '../src/protocol/session';
+import type { SuggestionScope } from '../src/protocol/rpc';
 import { derive, fileFacts, LoopIndex, loopJobs, stopNote, type Body, type BridgeAgent, type Derivation } from './jobs';
 import { answerOutput, type Locate } from './output';
 import type { Recording, Row, Step } from './recording';
@@ -35,11 +46,19 @@ import type { Recording, Row, Step } from './recording';
  * desk control surface's M0 (sminos `M0_SMINOS`), everything `dc8` does and more: each bridged session's presence
  * carries its `capabilities` (but a stale session's, whose mod loaded before the update), the machine presence its
  * `desk`, a `read status` is answered on the sub, and a `command` RPC runs (`commands.ts`); an older producer sends
- * neither field and passes `read` by.
+ * neither field and passes `read` by. `m1` adds the pushed catalog; `mw1` (sminos `MW1_SMINOS`, the machine-side wave's
+ * MW1) the reads of usage, config, settings and MCP, answered as the MW1 live check recorded them, and
+ * `capabilities.controls`; `mw2` (sminos `MW2_SMINOS`) the side question (`btw`), answered as the MW2 live check
+ * recorded it, and compact's `instructions`; `mw3` (sminos `MW3_SMINOS`) the scoped allows: a permission request
+ * raised with the engine's suggestions, as the MW3 live check recorded them, and `decide`'s `scope` checked and applied
+ * as the daemon does; `mw4` (sminos `MW4_SMINOS`) one subagent stopped or told (`stop-agent`, `tell`), checked against
+ * the bridge's agent tree as the daemon checks it, the stop leaving the parent the note the MW4 live check recorded;
+ * `mw5` (sminos `MW5_SMINOS`) image and PDF intake (`media`), answered `queued` and each attachment's states following as
+ * `op`, as the MW5 live check recorded them.
  */
-export type Producer = 'dc3' | 'dc8' | 'm0' | 'm1';
+export type Producer = 'dc3' | 'dc8' | 'm0' | 'm1' | 'mw1' | 'mw2' | 'mw3' | 'mw4' | 'mw5';
 
-const LEVEL: Record<Producer, number> = { dc3: 0, dc8: 1, m0: 2, m1: 3 };
+const LEVEL: Record<Producer, number> = { dc3: 0, dc8: 1, m0: 2, m1: 3, mw1: 4, mw2: 5, mw3: 6, mw4: 7, mw5: 8 };
 
 /** Whether `producer` does what `level` added. */
 export const producerAtLeast = (producer: Producer, level: Producer): boolean => LEVEL[producer] >= LEVEL[level];
@@ -59,6 +78,136 @@ export const M0_CAPABILITIES: Capabilities = {
 };
 
 export const M1_CAPABILITIES: Capabilities = { ...M0_CAPABILITIES, sminos: M1_SMINOS, reads: ['status', 'catalog'] };
+
+/** The sminos version of the machine-side wave's MW1 (the reads, and `capabilities.controls`). */
+export const MW1_SMINOS = '1.11.0';
+
+/** What an MW1 bridge answers its four new reads with, as the MW1 live check recorded them on 2.1.310 (`usage-full` is
+ * the answer to `{breakdown: 'full'}`; `mcp` carries the plane's disabled server). */
+export const MW1_READS = mw1.reads as unknown as { usage: UsageRead; 'usage-full': UsageRead; config: ConfigRead; settings: SettingsRead; mcp: McpRead };
+
+/** An MW1 bridge's capabilities: M1's, its new reads, and every control's capability as the live check's bridge said
+ * them (the engine stays the table's 2.1.307, as the fake's `read status` says). */
+export const MW1_CAPABILITIES: Capabilities = {
+  ...M1_CAPABILITIES,
+  sminos: MW1_SMINOS,
+  reads: [...M1_CAPABILITIES.reads, 'usage', 'config', 'settings', 'mcp'],
+  controls: mw1.capabilities.controls as ControlCapabilities,
+};
+
+const MW1_KINDS = new Set(['usage', 'config', 'settings', 'mcp']);
+
+/** The sminos version of the machine-side wave's MW2 (the side question, compact's instructions). */
+export const MW2_SMINOS = '1.12.0';
+
+/** What the MW2 live check recorded of a side question (dx4/README.md): the bridge's answers when it was refused
+ * (before the session's first model request) and started, and the `btw` events of the started one, in order. */
+export const MW2_BTW = mw2.btw as unknown as { refused: JsonObject; started: JsonObject; events: JsonObject[]; prompt: string };
+
+/** An MW2 bridge's capabilities: MW1's, its `btw` op, and every control's capability as the MW2 live check's bridge
+ * said them (`btw` available). The engine and the route table stay 2.1.307, as MW1's do: the fake routes a `command`
+ * by the vendored 2.1.307 table. */
+export const MW2_CAPABILITIES: Capabilities = {
+  ...MW1_CAPABILITIES,
+  sminos: MW2_SMINOS,
+  ops: [...MW1_CAPABILITIES.ops, 'btw'],
+  controls: mw2.capabilities.controls as ControlCapabilities,
+};
+
+/** The sminos version of the machine-side wave's MW3 (the scoped allows). */
+export const MW3_SMINOS = '1.13.0';
+
+/**
+ * What the MW3 live check recorded (dx4/README.md): each permission request the bridge raised with the engine's
+ * suggestions, the scope a desk would send for it and the rule the daemon resolved and handed the engine (`session`, the
+ * suggestion's own `localSettings`, a directory), and the request a guard beneath had restored, raised without them.
+ */
+export type ScopedRecording = { raised: { request: string; tool: string; input: JsonObject; suggestions?: PermissionUpdate[] }; scope: SuggestionScope; updatedPermissions: PermissionUpdate[] };
+export const MW3_SCOPED = mw3 as unknown as { scoped: ScopedRecording[]; withheld: { raised: { request: string; tool: string; input: JsonObject } } };
+
+/** An MW3 bridge's capabilities: MW2's, and every control's capability as the MW3 live check's bridge said them
+ * (`decide.scope` and `decide.addDirectory` available). The engine and the route table stay 2.1.307, as MW1's do. */
+export const MW3_CAPABILITIES: Capabilities = {
+  ...MW2_CAPABILITIES,
+  sminos: MW3_SMINOS,
+  controls: mw3.capabilities.controls as ControlCapabilities,
+};
+
+/** The sminos version of the machine-side wave's MW4 (one subagent stopped or told). */
+export const MW4_SMINOS = '1.14.0';
+
+/**
+ * What the MW4 live check recorded (dx4/README.md): a background agent's spawn as the bridge's child keeps it in the
+ * tree (named by its Agent call, `bg-sleeper`), the bridge's answers to a stop by that name, by an id and of a foreground
+ * agent, to a message, and to an agent no tree holds, the text the agent read, and the note its parent read.
+ */
+export type AgentAnswer = { ok: boolean; result?: JsonObject; error?: string; code?: string };
+export const MW4_AGENTS = mw4 as unknown as {
+  spawn: { agentId: string; parentAgentId: string | null; subagentType: string; description: string; name: string; background: boolean; model: string; toolUseId: string };
+  stop: { byName: { asked: string; answer: AgentAnswer }; byId: { asked: string; answer: AgentAnswer }; foreground: { asked: string; answer: AgentAnswer }; again: AgentAnswer };
+  tell: { asked: string; answer: AgentAnswer; read: string };
+  unknown: { stop: AgentAnswer; tell: AgentAnswer; spaced: AgentAnswer };
+  note: string;
+};
+
+/** The note an MW4 bridge leaves a stopped agent's parent, naming the agent as the person did (§9, as recorded). */
+export const agentStopNote = (asked: string): string => MW4_AGENTS.note.replace(MW4_AGENTS.stop.byName.asked, asked);
+
+/** An MW4 bridge's capabilities: MW3's, its `stop-agent` and `tell` ops, and every control's capability as the MW4 live
+ * check's bridge said them (`stop-agent` and `tell` available). The engine and the route table stay 2.1.307. */
+export const MW4_CAPABILITIES: Capabilities = {
+  ...MW3_CAPABILITIES,
+  sminos: MW4_SMINOS,
+  ops: [...MW3_CAPABILITIES.ops, 'stop-agent', 'tell'],
+  controls: mw4.capabilities.controls as ControlCapabilities,
+};
+
+/** The sminos version of the machine-side wave's MW5 (image and PDF intake). */
+export const MW5_SMINOS = '1.15.0';
+
+/**
+ * What the MW5 live check recorded (dx4/README.md): an idle upload of a PNG and a PDF answered `queued` and every `op`
+ * body it sent, in order (each attachment `read`, then `forwarded`, the last `phase: 'end'`); the ends of an upload whose
+ * Read the desk denied (`failed`), of one whose first attachment Esc stopped mid-step (`aborted`, the second read in the
+ * person's next turn), and of a claim a reload found without a result (`aborted`, `indeterminate after reload`); and the
+ * bridge's wake and prelude.
+ */
+export const MW5_MEDIA = mw5 as unknown as {
+  queued: { state: 'done'; result: { queued: true; upload: string; intake: 'native-read'; root: string; paths: string[] } };
+  states: MediaOpBody[];
+  failed: MediaOpBody;
+  aborted: MediaOpBody;
+  indeterminate: MediaOpBody;
+  wake: string;
+  prelude: string;
+};
+
+/** An MW5 bridge's capabilities: MW4's, its `media` op, and every control's capability as the MW5 live check's bridge
+ * said them (`media` available). The engine and the route table stay 2.1.307. */
+export const MW5_CAPABILITIES: Capabilities = {
+  ...MW4_CAPABILITIES,
+  sminos: MW5_SMINOS,
+  ops: [...MW4_CAPABILITIES.ops, 'media'],
+  controls: mw5.capabilities.controls as ControlCapabilities,
+};
+
+/** The sminos version, and the bridge's capabilities, that `producer` stands for. */
+export const sminosOf = (producer: Producer): string =>
+  producerAtLeast(producer, 'mw5') ? MW5_SMINOS : producerAtLeast(producer, 'mw4') ? MW4_SMINOS : producerAtLeast(producer, 'mw3') ? MW3_SMINOS : producerAtLeast(producer, 'mw2') ? MW2_SMINOS : producerAtLeast(producer, 'mw1') ? MW1_SMINOS : producerAtLeast(producer, 'm1') ? M1_SMINOS : M0_SMINOS;
+const capabilitiesOf = (producer: Producer): Capabilities =>
+  producerAtLeast(producer, 'mw5')
+    ? MW5_CAPABILITIES
+    : producerAtLeast(producer, 'mw4')
+    ? MW4_CAPABILITIES
+    : producerAtLeast(producer, 'mw3')
+    ? MW3_CAPABILITIES
+    : producerAtLeast(producer, 'mw2')
+      ? MW2_CAPABILITIES
+      : producerAtLeast(producer, 'mw1')
+        ? MW1_CAPABILITIES
+        : producerAtLeast(producer, 'm1')
+          ? M1_CAPABILITIES
+          : M0_CAPABILITIES;
 
 /** The per-uid temporary root the recordings' engine wrote task outputs under (macOS, uid 501): `<resolved tmp>/claude-<uid>`. */
 export const ENGINE_TMP = '/private/tmp/claude-501';
@@ -133,6 +282,8 @@ export class SessionDepth {
   mainTurn: string | null = null;
   /** Stops run before a crash whose TaskStop rows the replay has not reached yet (`restoreStop`). */
   private readonly stopsToRestore = new Set<string>();
+  /** Agent stops run before a crash, by id: the spelling asked, and whether the replay has written the note yet (`restoreAgentStop`). */
+  private readonly restoredAgentStops = new Map<string, { asked: string; isNoted: boolean }>();
 
   constructor(
     readonly id: string,
@@ -178,7 +329,7 @@ export class SessionDepth {
    * and while the session is `stale` (its mod loaded before its machine's update, until a reload).
    */
   get capabilities(): Capabilities | null {
-    return this.bridge && producerAtLeast(this.producer, 'm0') && !this.stale ? (producerAtLeast(this.producer, 'm1') ? M1_CAPABILITIES : M0_CAPABILITIES) : null;
+    return this.bridge && producerAtLeast(this.producer, 'm0') && !this.stale ? capabilitiesOf(this.producer) : null;
   }
 
   /** The session's DX4 presence body: its record, whether it is bridged, and its bridge's capabilities when held. */
@@ -200,14 +351,22 @@ export class SessionDepth {
 
   /**
    * Answers a browser's `read` on the subscription (an M0 producer; an older one passes it by): `status` from the bridge
-   * on a main-scope subscription, every other kind and scope an `unsupported` error, as the plane answers them.
+   * on a main-scope subscription, `catalog` from an M1 one, `usage` (the full count when `args.breakdown` is `full`),
+   * `config`, `settings` and `mcp` from an MW1 one, every other kind and scope an error, as the plane answers them.
    */
-  read(sub: string, id: string, what: string): void {
+  read(sub: string, id: string, what: string, args?: JsonObject): void {
     const s = this.subs.get(sub);
     if (!s || !producerAtLeast(this.producer, 'm0')) return;
     const answer = (body: Omit<ReadAnswer, 'id' | 'what'>) => this.deliver(sub, s, { kind: 'read', body: { id, what, ...body } });
     if (!this.bridge || this.record === null) return answer({ error: { code: 'no-bridge', message: 'the session has no bridge, or has ended' } });
     if (what === 'catalog' && s.agentId === null && this.catalog) return answer({ result: this.catalog as unknown as JsonObject });
+    if (MW1_KINDS.has(what) && this.capabilities?.reads.includes(what)) {
+      if (s.agentId !== null) return answer({ error: { code: 'unsupported', message: "a read is the session's: ask it on the main loop's subscription" } });
+      const breakdown = args?.breakdown ?? 'summary';
+      if (what === 'usage' && breakdown !== 'summary' && breakdown !== 'full') return answer({ error: { code: 'failed', message: "usage's breakdown is summary or full" } });
+      const result = what === 'usage' ? MW1_READS[breakdown === 'full' ? 'usage-full' : 'usage'] : MW1_READS[what as 'config' | 'settings' | 'mcp'];
+      return answer({ result: result as unknown as JsonObject });
+    }
     if (what !== 'status' || !this.capabilities) return answer({ error: { code: 'unsupported', message: `no read ${what}` } });
     if (s.agentId !== null) return answer({ error: { code: 'unsupported', message: "status is the main transcript's" } });
     const cwd = this.recording?.cwd ?? '';
@@ -348,6 +507,7 @@ export class SessionDepth {
         if (step.spawn) this.bridgeAgents.set(step.agentId, { agentId: step.agentId, ...step.spawn, running: true });
         if (this.widens) this.refresh();
         else this.fanOut(null, { kind: 'subagents', body: { subagents: this.subagents() } }, false);
+        this.reapplyAgentStops();
         return;
       }
       case 'agent-stop': {
@@ -363,6 +523,7 @@ export class SessionDepth {
           if (this.widens) this.joinTree(a.agentId);
         }
         this.refresh();
+        this.reapplyAgentStops();
         return;
       case 'usage':
         this.usage = step.body;
@@ -634,6 +795,86 @@ export class SessionDepth {
       message: { role: 'user', content: [{ type: 'text', text: stopNote(taskId) }] },
     });
     return true;
+  }
+
+  /**
+   * The agent the bridge's tree names by `ref`, as the daemon resolves a `stop-agent` or a `tell` before the claim
+   * (MW4): an id the tree holds first, running or not, then the Agent call's name of exactly one running agent; else
+   * `unknown-agent` (none running by it, a description among them) or `ambiguous-agent` (a name two running agents hold).
+   */
+  resolveAgent(ref: string): { agent: BridgeAgent } | { code: 'unknown-agent' | 'ambiguous-agent'; message: string } {
+    const byId = this.bridgeAgents.get(ref);
+    if (byId) return byId.running ? { agent: byId } : { code: 'unknown-agent', message: `agent ${ref} is not running` };
+    const named = [...this.bridgeAgents.values()].filter((a) => a.running && a.name === ref);
+    if (named.length === 1) return { agent: named[0] };
+    if (named.length > 1) return { code: 'ambiguous-agent', message: `${named.length} running agents are named ${ref} (${named.map((a) => a.agentId).join(', ')}): name one by its id` };
+    return { code: 'unknown-agent', message: `the session's subagent tree holds no running agent by the id or name ${ref}` };
+  }
+
+  /** Whether the agent of this id (no name) is running. */
+  isAgentRunning(agentId: string): boolean {
+    return this.bridgeAgents.get(agentId)?.running === true;
+  }
+
+  /** The running agent `ref` resolves to (`resolveAgent`), or null. */
+  runningAgent(ref: string): BridgeAgent | null {
+    const found = this.resolveAgent(ref);
+    return 'agent' in found ? found.agent : null;
+  }
+
+  /**
+   * What the bridge's `stop-agent` leaves in the session: the agent `agentId` (the one the daemon resolved, never another
+   * by its name) stopped in the tree (its spawn kept, `running` false, as the bridge's next read of the engine's list says
+   * it), and the note naming it as `asked` in its parent's loop (main for an agent main spawned), a meta user row with
+   * the plugin's origin. False, and nothing written, when that agent is not running.
+   */
+  stopAgent(agentId: string, asked: string): boolean {
+    const agent = this.bridgeAgents.get(agentId);
+    if (!agent?.running) return false;
+    this.bridgeAgents.set(agentId, { ...agent, running: false });
+    this.writeAgentStopNote(agent, asked);
+    return true;
+  }
+
+  /** A stop's note naming the agent as `asked`, in its parent's loop (main for an agent main spawned). */
+  private writeAgentStopNote(agent: BridgeAgent, asked: string): void {
+    const loop = agent.parentAgentId ?? null;
+    this.appendRow(loop, {
+      type: 'user',
+      uuid: randomUUID(),
+      parentUuid: this.rows.get(loop ?? 'main')?.at(-1)?.uuid ?? null,
+      sessionId: this.id,
+      isSidechain: loop !== null,
+      timestamp: new Date().toISOString(),
+      isMeta: true,
+      origin: { kind: 'plugin', name: this.plugin },
+      message: { role: 'user', content: [{ type: 'text', text: agentStopNote(asked) }] },
+    });
+    this.refresh();
+  }
+
+  /**
+   * An agent stop this machine ran before a crash (its trace): the replay starts again from the recording, which knows
+   * nothing of it, so the stop stays over every later update of the replay (a spawn, a resync of the tree), as the
+   * engine would still hold the agent ended, and its note is written once, when the agent first appears, as a
+   * transcript on disk would still hold it.
+   */
+  restoreAgentStop(agentId: string, asked: string): void {
+    this.restoredAgentStops.set(agentId, { asked, isNoted: false });
+  }
+
+  /** Holds each restored stop over the replay: its agent not running, its note written once. */
+  private reapplyAgentStops(): void {
+    for (const [agentId, stop] of this.restoredAgentStops) {
+      const agent = this.bridgeAgents.get(agentId);
+      if (!agent) continue;
+      const wasRunning = agent.running;
+      if (wasRunning) this.bridgeAgents.set(agentId, { ...agent, running: false });
+      if (!stop.isNoted) {
+        stop.isNoted = true;
+        this.writeAgentStopNote(agent, stop.asked); // refreshes
+      } else if (wasRunning) this.refresh();
+    }
   }
 
   /** The working tree's diff, on a main-scope subscription. */

@@ -38,6 +38,13 @@ const TIMING_NODE_TESTS = [
   'src/engine-host/documents/sigkill.test.ts', // P3-A: bundles and forks a writer, kills it mid-stream, reopens the store
   'test/artifacts/one-schema.test.ts', // P3-B: the portability test's pattern, for the one-schema rule
   'test/one-locale.test.ts', // the same pattern, for the one-locale rule over src/ and the desk's web app
+  'test/endpoint/enroll.test.ts', // P5 O10 M2: enrolls against desk-hub's local runner, a wrangler dev child process
+  'test/endpoint/provision.test.ts', // P5 O14 M1: provisions, retires and unenrolls against the same local runner
+  'test/endpoint/hub-link.test.ts', // P5 O10 M3: reconnects on the hub link's backoff, timed against a stand-in hub
+  'test/endpoint/hub-link.local.test.ts', // P5 O10 M3: RL1 against desk-hub's Worker in Miniflare (cuts, redeploys, leases)
+  'test/endpoint/channels.local.test.ts', // P5 O10 M4: RL2 over the hub's multiplex (desk-hub's Worker in Miniflare) and the direct listener
+  'test/endpoint/rl10/conversation.local.test.ts', // P5 O10 M6: RL10's conversation replayed against the real socket and desk-hub's Worker in Miniflare
+  'test/endpoint/subscriptions.local.test.ts', // P5 O10 M8: subscriptions across a forced drop over the hub's multiplex (desk-hub's Worker in Miniflare) and the direct listener
 ];
 const TIMING_RENDERER_TESTS = [
   'src/renderer/src/App.test.tsx',
@@ -114,7 +121,7 @@ export default defineConfig({
         test: {
           name: 'node',
           environment: 'node',
-          include: ['src/{shared,main,preload,engine-host,pty-host}/**/*.test.ts', 'test/**/*.test.ts', RENDERER_NODE_TESTS],
+          include: ['src/{shared,main,preload,engine-host,pty-host,endpoint}/**/*.test.ts', 'test/**/*.test.ts', RENDERER_NODE_TESTS], // P5 O10: src/endpoint (its suites live in test/endpoint)
           exclude: ['**/node_modules/**', 'test/live/**/*.live.test.ts', ...TIMING_NODE_TESTS, ...DISPLAY_NODE_TESTS], // C3: live cases run only in the `live` project; their support's own tests run here
           css: { include: [/\/design_system\/defaults\/.+\.css/] }, // P3-D: the defaults' `document.css` as text (`?raw`) for the host's and main's tests, as in `artifacts`
           // The compile-time suites (`src/**/*.test-d.ts`) are checked by `pnpm typecheck` alone, tsconfig.node.json
@@ -177,6 +184,8 @@ export default defineConfig({
       // this vitest, so `pnpm test` and the unit job's `--maxWorkers` reach it as they reach every project above.
       'apps/desk-hub/vitest.config.ts',
       'apps/desk-web/vitest.config.ts', // DC5: the web app's client, log, and key, against the DX3 double
+      'apps/desk-web/vitest.local.config.ts', // P5 O13 M4: the cards client against the real endpoint on the local hub (a wrangler dev child)
+      'apps/org-protocol/vitest.config.ts', // P5-O11 M1: the protocol package's vectors, in Node and in workerd
     ],
   },
 });

@@ -2,18 +2,22 @@
 // project of the hub — the local stand-in's or a deployment's — and stay connected, serving subscriptions and answering
 // RPCs, until interrupted. Its state file (0600) holds the machine's service token, the org key, and the memory a
 // restart needs (the RPC ledger above all), so a run after a crash answers a retried nonce without running it again.
-import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, renameSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { base64urlDecode, base64urlEncode } from '../src/protocol/base64url';
+import { readJsonFile } from './json-file';
 import { FakeMachine } from './machine';
+import { relayMain } from './relay-cli';
 import { emptyMemory, type Memory } from './memory';
 import type { Credentials } from './link';
 import { loadRecording } from './recording';
+import type { Producer } from './session';
 
 type State = { hub: string; machine: string; credentials: Credentials; key: string; memory: Memory };
 
 const USAGE = `usage:
+  fake-machine enroll-v2 | endpoint | relay-check …   RL1's fake endpoint (O11 M6): run one with no options for its usage
   fake-machine enroll --state <file>
       reads an enrollment code on stdin (the web app's "Enroll a machine"; never an argument, since it carries the org
       key), redeems it at the hub it names, and writes the state file (0600)
@@ -30,11 +34,19 @@ const USAGE = `usage:
       --follow                 open the project as a follower (hello.follow): no presence; give it no --recording
       --keep-times             log events keep their recorded ts (default: when first written)
       --producer <daemon>      dc3 (default) | dc8: DX4's widened subagents body, jobs, MCP names, and output |
-                               m0: dc8 and capabilities, read status, command | m1: pushed catalogs and measured prompt commands
+                               m0: dc8 and capabilities, read status, command | m1: pushed catalogs and measured prompt commands |
+                               mw1: m1 and the reads of usage, config, settings and MCP, and capabilities.controls |
+                               mw2: mw1 and the side question (btw), and compact's instructions |
+                               mw3: mw2 and the scoped allows: once played, the MW3 live check's permission requests
+                               raised with the engine's suggestions, and decide's scope |
+                               mw4: mw3 and one subagent stopped or told: once played, the MW4 live check's named
+                               agent (bg-sleeper) running, for stop-agent and tell |
+                               mw5: mw4 and image and PDF intake (media): an upload answered queued, each attachment's
+                               states following as op
       --plugin <name>          doperpowers (default) | sminos: the plugin its bridge and ask run in (a rolled machine)`;
 
 function readState(path: string): State {
-  return JSON.parse(readFileSync(path, 'utf8')) as State;
+  return readJsonFile<State>(path, "a fake machine's state");
 }
 
 function writeState(path: string, state: State): void {
@@ -52,6 +64,8 @@ async function stdin(): Promise<string> {
 
 export async function main(argv: string[], defaults: { recording: string }): Promise<number> {
   const [command, ...rest] = argv;
+  // RL1's commands (O11 M6): a v2 enrollment, the fake endpoint, and an app's echo check through it.
+  if (command === 'enroll-v2' || command === 'endpoint' || command === 'relay-check') return relayMain(command, rest);
   const { values } = parseArgs({
     args: rest,
     options: {
@@ -90,8 +104,8 @@ export async function main(argv: string[], defaults: { recording: string }): Pro
     console.error('--decisions is recorded or wait');
     return 2;
   }
-  if (values.producer !== 'dc3' && values.producer !== 'dc8' && values.producer !== 'm0' && values.producer !== 'm1') {
-    console.error('--producer is dc3, dc8, m0 or m1');
+  if (!['dc3', 'dc8', 'm0', 'm1', 'mw1', 'mw2', 'mw3', 'mw4', 'mw5'].includes(values.producer)) {
+    console.error('--producer is dc3, dc8, m0, m1, mw1, mw2, mw3, mw4 or mw5');
     return 2;
   }
   if (values.plugin !== 'doperpowers' && values.plugin !== 'sminos') {
@@ -127,7 +141,7 @@ export async function main(argv: string[], defaults: { recording: string }): Pro
       follow: values.follow,
       retime: !values['keep-times'],
       reconnect: true,
-      producer: values.producer,
+      producer: values.producer as Producer,
       plugin: values.plugin,
     });
     await machine.connect();
@@ -135,6 +149,14 @@ export async function main(argv: string[], defaults: { recording: string }): Pro
     for (const r of recordings) console.log(`  replaying ${r.name} as session ${r.session} (${r.chunks} chunks, ${r.steps.length} steps)`);
     await machine.play({ speed: Number(values.speed) });
     console.log(`  played; ${machine.rpcs.length} RPCs answered so far`);
+    if ((values.producer === 'mw4' || values.producer === 'mw5') && round === 0 && recordings.length > 0) {
+      const agentId = await machine.spawnRecordedAgent(recordings[0]!.session);
+      console.log(`  spawned the MW4 recording's agent bg-sleeper (${agentId}), running`);
+    }
+    if ((values.producer === 'mw3' || values.producer === 'mw4' || values.producer === 'mw5') && round === 0 && recordings.length > 0) {
+      const raised = await machine.raiseRecordedScoped(recordings[0]!.session);
+      console.log(`  raised the MW3 recording's requests: ${raised.map((r) => `${r.request} (${r.suggestions?.length ?? 0} suggestions)`).join(', ')}`);
+    }
     if (!values.loop) break;
     round++;
     await machine.close();

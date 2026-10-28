@@ -34,8 +34,35 @@ export type Raised = {
   deadline?: string;
   /** An async question of the ask mod's: answered or withdrawn, never denied. */
   async?: true;
+  /**
+   * The engine's `permission_suggestions` for a permission prompt, verbatim (the desk control surface spec, MW3): a
+   * rule, a directory or a mode the engine offers to add with the allow. At most `SUGGESTIONS_MAX`, each at most
+   * `SUGGESTION_BYTES_MAX` bytes as canonical UTF-8 JSON; the bridge leaves a list past either bound out whole, and the
+   * hub refuses a `raised` that carries one. Absent when the engine suggested nothing, when the list broke the bound, or
+   * when the engine's input was not exactly the call the bridge saw (a secrets guard beneath restored a handle, whose
+   * value a Bash rule would carry). A scoped allow (`RpcArgs.decide.scope`) names one by its index and hash. The code
+   * covers it like every other field.
+   */
+  suggestions?: PermissionUpdate[];
   mac: Mac;
 };
+
+/** How many suggestions a `raised` carries at most, and each one's canonical UTF-8 JSON at most: the bridge's bound,
+ * exactly (a `raised` the hub refuses refuses the request with it, and one bad entry a whole pending set). */
+export const SUGGESTIONS_MAX = 8;
+export const SUGGESTION_BYTES_MAX = 2048;
+
+/** Where a permission update applies: `session` saves nothing; the others are settings files. */
+export type PermissionDestination = 'userSettings' | 'projectSettings' | 'localSettings' | 'session' | 'cliArg';
+
+/**
+ * One permission update the engine suggests (the SDK's `PermissionUpdate`), passed through as the engine words it. A
+ * scoped allow takes only an `addRules` or an `addDirectories` one; the others are shown, never applied from the desk.
+ */
+export type PermissionUpdate =
+  | { type: 'addRules' | 'replaceRules' | 'removeRules'; rules: PermissionRule[]; behavior: 'allow' | 'deny' | 'ask'; destination: PermissionDestination }
+  | { type: 'setMode'; mode: string; destination: PermissionDestination }
+  | { type: 'addDirectories' | 'removeDirectories'; directories: string[]; destination: PermissionDestination };
 
 /** `withdrawn`: the request ended with no answer used (the turn aborted, the session ended, the call settled another way). */
 export type SettledOutcome = 'allow' | 'deny' | 'answered' | 'withdrawn';
@@ -154,9 +181,37 @@ export type SessionPresence = {
 /**
  * A bridge's capabilities (DX5 `GET /status`): the loaded mod's own plugin version, its protocol, the engine's release
  * base, the ops it answers, the read kinds it serves, and the engine base its route table was measured on (behind
- * `engine` when the engine is newer than every table it carries).
+ * `engine` when the engine is newer than every table it carries). `controls` (sminos 1.11.0, the machine-side wave's
+ * MW1) is each desk control's capability; absent from an older bridge.
  */
-export type Capabilities = { sminos: string; protocol: number; engine: string; ops: string[]; reads: string[]; routes: { measured: string } };
+export type Capabilities = {
+  sminos: string;
+  protocol: number;
+  engine: string;
+  ops: string[];
+  reads: string[];
+  routes: { measured: string };
+  controls?: ControlCapabilities;
+};
+
+/** The desk's controls by the names of remote-architecture's lane map (`lane-b-control-map.md`), path-neutral: a path-B
+ * daemon fills the same keys from the SDK's control requests, and the web greys a control by its key, never by lane. */
+export const CONTROL_KEYS = [
+  'read.usage', 'read.config', 'read.settings', 'read.mcp',
+  'btw', 'compact', 'model',
+  'mcp.enable', 'mcp.disable', 'mcp.reconnect',
+  'decide', 'decide.scope', 'decide.interrupt',
+  'decide.addDirectory', 'stop-agent', 'tell',
+  'media', 'forget', 'rewind-files', 'elicitation.answer',
+] as const;
+export type ControlKey = (typeof CONTROL_KEYS)[number];
+
+/** Whether this session's bridge can do a control, and why not (said to the person). */
+export type ControlCapability = { available: boolean; reason?: string };
+
+/** Each control's capability. A key that is missing (a control a newer desk names) is unavailable. The bridge sends
+ * every key it knows, its unavailable ones with their reasons. */
+export type ControlCapabilities = Partial<Record<ControlKey, ControlCapability>>;
 
 /** A permission mode as the bridge last read it, `at` epoch ms on the machine's clock. */
 export type ModeReading = { mode: string; at: number };
@@ -186,6 +241,90 @@ export type StatusRead = {
   surfaces: string[];
   override: { model: string | null; effort: string | null } | null;
   mode?: ModeReading;
+};
+
+/**
+ * `read usage`'s result (MW1; args `{breakdown?: 'summary' | 'full'}`, the summary unless `full` is asked, which calls
+ * the token-count API): the session's usage, the context window broken down in the SDK's `get_context_usage` shape, and
+ * which count it is. Lane A (the bridge) answers the engine's `$.session.usage`, so `startedAt`, `window`,
+ * `rateLimits` (empty off a claude.ai subscription) and `cost` are always present there; `rateLimitsAvailable` and
+ * `sessionTotals` are a path-B daemon's.
+ */
+export type UsageRead = {
+  startedAt?: number;
+  context: { tokens?: number; window?: number; percent?: number; breakdown?: ContextBreakdown };
+  rateLimits?: Array<{ kind: string; percentUsed?: number; resetsAt?: string }>;
+  cost?: { usd: number };
+  breakdownDetail: 'summary' | 'full';
+  rateLimitsAvailable?: boolean;
+  sessionTotals?: JsonObject;
+};
+
+/** The context window by category as `/context` draws it: the SDK's `get_context_usage` reply (categories, grid rows,
+ * memory files, MCP tools, agents, skills, …), carried as the engine gives it. */
+export type ContextBreakdown = JsonObject;
+
+/** One `/config` row as the engine's `$.config.list()` gives it. A plugin's `text` row has no `value`: a plugin's
+ * `userConfig` field may hold a credential. `isLocked` is the engine's policy lock; the desk writes no config. */
+export type ConfigRow = {
+  key: string;
+  label: string;
+  description?: string;
+  kind: 'boolean' | 'choice' | 'text' | 'number';
+  value?: boolean | string | number | string[];
+  options?: string[];
+  provider: { plugin: string; tier: string };
+  isLocked: boolean;
+};
+
+/** `read config`'s result (MW1): the rows in the engine's order; `readOnly`, the desk's own policy (F1). */
+export type ConfigRead = { rows: ConfigRow[]; readOnly: true };
+
+/** A permission rule as the engine's `PermissionRuleValue` holds it (`Bash(npm test:*)` is `{toolName: 'Bash',
+ * ruleContent: 'npm test:*'}`). */
+export type PermissionRule = { toolName: string; ruleContent?: string };
+export type PermissionRules = { allow: PermissionRule[]; ask: PermissionRule[]; deny: PermissionRule[] };
+
+/**
+ * `read settings`'s result (MW1): the permission rules, merged and by source, and each hook's event, matcher and how
+ * many commands it runs — never a command's text (*terminal: /hooks*), never `env` or any other key. Lane A projects the
+ * settings files, so `permissionsExact` is false there (a session's own allows and the plugins' hooks are not in them);
+ * `livePermissions` is a path-B daemon's native view. Source names are extensible; the engine's `flag` is `cliArg`.
+ */
+export type SettingsRead = {
+  permissionsExact: boolean;
+  permissions: PermissionRules & {
+    additionalDirectories: string[];
+    defaultMode: string | null;
+    /** `user`, `project`, `local`, `policy`, `cliArg`; lane A sends all five. */
+    bySource: Record<string, PermissionRules>;
+  };
+  hooks: Record<string, Array<{ matcher: string | null; commands: number }>>;
+  livePermissions?: JsonObject;
+};
+
+/** An MCP server's state; a status this version does not know is drawn as `unknown`. */
+export type McpServerStatus = 'connected' | 'disabled' | 'pending' | 'failed' | 'needs-auth' | 'unknown';
+
+/**
+ * `read mcp`'s result (MW1): never a server's configuration. Lane A says `exact: false`: the bridge names the servers
+ * whose tools the model has (`connected`, with the count, the name spelled as the tools spell it: `my server` is
+ * `my_server`), and the plane adds those the project disables (`disabled`, the configured name); a server failed,
+ * pending or awaiting sign-in is not seen. A path-B daemon's engine snapshot is `exact: true`, with the other fields.
+ */
+export type McpRead = {
+  exact: boolean;
+  servers: Array<{
+    name: string;
+    status: McpServerStatus;
+    tools?: number;
+    source?: string;
+    scope?: string;
+    transport?: string;
+    serverInfo?: JsonObject;
+    error?: string;
+    errorCode?: string;
+  }>;
 };
 
 /** A command's class in the bridge's route table (the desk control surface spec, §2). */
@@ -221,10 +360,46 @@ export type Readback = { how: 'text' | 'row' | 'effect' | 'none'; text?: string;
 /**
  * An async op's outcome, outside any subscription, to every browser of the project (§3): `rpc` the nonce of the DX6 RPC
  * that asked, or null for an op started elsewhere (the CLI). A `command`'s `start` carries `name` and `args`; its `end`
- * adds `settled` (the engine's promise: `{ok: true, text?}` or `{ok: false, error}`) and `readback`. The hub relays it
- * without reading it.
+ * adds `settled` (the engine's promise: `{ok: true, text?}` or `{ok: false, error}`) and `readback`. A `btw`'s `end`
+ * carries the answer — `text` (at most 64 KiB of UTF-8; `truncated: true` when cut) and `usage: {input, output,
+ * cacheRead, cacheWrite}` — or a `reason`: `nothing-to-fork`, `api-error` (with `status` when the API gave one, and
+ * `error`, its kind), `empty-reply`, `aborted`, or `failed` (with `error`); `usage` comes with every reason but
+ * `nothing-to-fork` and `failed`. The hub relays it without reading it. Lane A's `stop-agent` and `tell` send none:
+ * their RPC's answer is the outcome (MW4); the names stay for a lane whose stop or message settles later. A `media`
+ * upload's (MW5) is `MediaOpBody`, one per attachment's change.
  */
-export type OpBody = { rpc: string | null; op: 'command' | 'btw' | 'stop-agent' | 'tell'; phase: 'start' | 'end'; id: string; [field: string]: JsonValue };
+export type OpBody = { rpc: string | null; op: 'command' | 'btw' | 'stop-agent' | 'tell' | 'media'; phase: 'start' | 'end'; id: string; [field: string]: JsonValue };
+
+/**
+ * An upload's attachment as the bridge can observe it (MW5): `read` a Read result of its tool-use id holding its
+ * `image` or `document` block; `forwarded` the next main-loop step passed the conversation on (a hook beneath the bridge
+ * may still answer that step without a model request, so it does not prove the model received it); `aborted` its claim
+ * was cancelled (an Esc, the turn's end, a reload that found no result: never streamed again); `failed` a denied or
+ * error result, or a file no longer inside its root, with the result's text as `reason`. `pending` and `claimed` are the
+ * bridge's own and appear only in `attachments`.
+ */
+export type MediaState = 'pending' | 'claimed' | 'read' | 'forwarded' | 'aborted' | 'failed';
+
+/**
+ * A `media` op (MW5): one attachment's change, `rpc` and `id` both the upload (the RPC's nonce), `index` the
+ * attachment's (not `n`: every line of the bridge's stream carries its own), `attachments` the whole upload as it stands,
+ * so the latest message is the whole picture. `phase` is `end` once every attachment has ended (`forwarded`, `aborted`
+ * or `failed`); the RPC's `queued` answer is the start, and no `start` precedes the first state. Idempotent by
+ * `(upload, index, state)`.
+ */
+export type MediaOpBody = {
+  rpc: string;
+  op: 'media';
+  phase: 'start' | 'end';
+  id: string;
+  upload: string;
+  index: number;
+  state: Exclude<MediaState, 'pending' | 'claimed'>;
+  toolUseId?: string;
+  reason?: string;
+  attachments: Array<{ index: number; state: MediaState; toolUseId?: string; reason?: string }>;
+  t?: number;
+};
 
 /**
  * A session's context use and cost: the bridge's `usage` event (DX5) verbatim, after each main turn, from the engine's

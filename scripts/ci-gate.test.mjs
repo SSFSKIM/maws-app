@@ -21,7 +21,7 @@ case "$*" in
   *" run list "*) ;;
   *"repos/SSFSKIM/MAWS/actions/variables"*) echo '["GATE_RUNNER","pool"]'; echo '["GATE_E2E_RUNNER","macos"]' ;;
   *"repos/SSFSKIM/ci-kit-sandbox/issues"*) echo '{"number":18,"title":"ci-kit alert: mini: UserNotificationCenter since 2026-10-19T21:08Z"}' ;;
-  *"repos/SSFSKIM/MAWS/actions/runners"*) echo '{"name":"ci-kit-mac-mini","status":"online"}' ;;
+  *"repos/SSFSKIM/MAWS/actions/runners"*) echo '{"name":"ci-kit-mac-mini","status":"online","labels":["self-hosted","macOS","ARM64","ci-kit-mac","ci-kit-mac-solo","ci-kit-mac-home"]}' ;;
   *) echo "fake gh: unexpected call $*" >&2; exit 1 ;;
 esac
 `;
@@ -59,15 +59,15 @@ function gate(args, { alerts = false, base = {}, change } = {}) {
     chmodSync(join(dir, 'gh'), 0o755);
     chmodSync(join(dir, 'sleep'), 0o755);
     const run = spawnSync('bash', [join(root, 'scripts/ci-gate.sh'), tree, ...args, '--keep'], { encoding: 'utf8', env });
-    const refs = git('--git-dir', origin, 'for-each-ref', '--format=%(refname)');
+    const refs = git('--git-dir', origin, 'for-each-ref', '--format=%(refname)').split('\n').filter((ref) => ref && ref !== 'refs/heads/master');
     const calls = join(dir, 'gh-calls');
     return {
       status: run.status,
       stdout: run.stdout,
       stderr: run.stderr,
       calls: existsSync(calls) ? readFileSync(calls, 'utf8').trimEnd().split('\n') : [],
-      refs: refs ? refs.split('\n').filter((ref) => ref !== 'refs/heads/master') : [],
-      message: refs ? git('--git-dir', origin, 'log', '-1', '--format=%B', `refs/heads/ci/gates-${short}`) : '',
+      refs,
+      message: refs.length > 0 ? git('--git-dir', origin, 'log', '-1', '--format=%B', `refs/heads/ci/gates-${short}`) : '',
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -136,16 +136,17 @@ test('a list of gates goes through as given, live groups with --live too', () =>
   assert.deepEqual(trailers(pooled.message), ['Gates: static,unit,probes', 'Runner: macos', 'Class1a: pool']);
 });
 
-// ci-kit's VM lane: --lane names where the run's MAC_VM_E2E groups go (gate-plan.mjs reads the `Lane:` trailer).
-test('--lane vm or vm-trial goes through as a Lane: trailer; any other value is refused before anything is pushed', () => {
+// ci-kit's VM lane: --lane names where the run's MAC_VM_E2E groups go (gate-plan.mjs reads the `Lane:` trailer); and
+// ci-kit's hosted-Mac spec: `hosted` sends every eligible e2e group to GitHub's hosted Macs, `no-hosted` none.
+test('--lane vm, vm-trial, hosted or no-hosted goes through as a Lane: trailer; any other value is refused before anything is pushed', () => {
   const vm = gate(['--gates', 'e2e:document-app', '--runner', 'macos', '--lane', 'vm']);
   assert.match(vm.stdout, /^ci-gate: [0-9a-f]{40} as ci\/gates-[0-9a-f]{8} \(Gates: e2e:document-app\) \(Runner: macos\) \(Lane: vm\)$/m);
   assert.deepEqual(trailers(vm.message), ['Gates: e2e:document-app', 'Runner: macos', 'Lane: vm']);
-  assert.deepEqual(trailers(gate(['--gates', 'e2e:document-app', '--lane', 'vm-trial']).message), ['Gates: e2e:document-app', 'Lane: vm-trial']);
-  for (const value of ['host', 'VM', 'vm,vm-trial']) {
+  for (const lane of ['vm-trial', 'hosted', 'no-hosted']) assert.deepEqual(trailers(gate(['--gates', 'e2e:document-app', '--lane', lane]).message), ['Gates: e2e:document-app', `Lane: ${lane}`], lane);
+  for (const value of ['host', 'VM', 'vm,vm-trial', 'Hosted', 'nohosted']) {
     const refused = gate(['--gates', 'e2e:document-app', '--lane', value], { alerts: true });
     assert.equal(refused.status, 2, value);
-    assert.equal(refused.stderr, `ci-gate: --lane is vm or vm-trial, not ${value}\n`);
+    assert.equal(refused.stderr, `ci-gate: --lane is vm, vm-trial, hosted or no-hosted, not ${value}\n`);
     assert.deepEqual(refused.calls, []);
     assert.deepEqual(refused.refs, []);
   }
@@ -211,4 +212,43 @@ test('--affected above its bound counts the paths and lists none; without the fl
   const plain = gate(['--gates', 'unit'], { base: files, change: (tree) => writeFileSync(join(tree, 'src/shared/a.ts'), 'export const a = 2;\n') });
   assert.match(plain.message, /^ci-gate: [0-9a-f]{8}\n\n/);
   assert.deepEqual(trailers(plain.message), ['Gates: unit']);
+});
+
+// The peer of the PEER_E2E groups (ci-gate-peer.mjs): a tree with a wire manifest names its merge base with origin/master
+// and both wires in the pushed commit, from which the plan adds the peer groups when they are a minor apart.
+const MANIFEST = 'src/shared/ipc/wire-manifest.json';
+const wire = (minor) => `${JSON.stringify({ major: 3, minor, capabilities: [], entries: {} })}\n`;
+const bump = { base: { [MANIFEST]: wire(0) }, change: (tree) => writeFileSync(join(tree, MANIFEST), wire(1)) };
+
+test('a tree a minor past its merge base pushes the peer and both wires after the other trailers; --peer none pushes none', () => {
+  const result = gate(['--gates', 'static,unit,probes', '--class1a', 'pool'], bump);
+  assert.equal(result.status, 1, result.stdout + result.stderr); // the fake gh finds no run
+  assert.match(result.stdout, /^ci-gate: peer [0-9a-f]{8} \(the merge base with origin\/master\), wire 3\.0; this tree's 3\.1, a minor apart$/m);
+  const pushed = trailers(result.message);
+  assert.deepEqual(pushed.slice(0, 2), ['Gates: static,unit,probes', 'Class1a: pool']);
+  assert.match(pushed[2], /^Peer: [0-9a-f]{40}$/);
+  assert.deepEqual(pushed.slice(3), ['Peer-Wire: 3.0', 'Wire: 3.1']);
+  assert.deepEqual(trailers(gate(['--gates', 'static', '--peer', 'none'], bump).message), ['Gates: static']);
+});
+
+test('a --peer that names no commit is refused with exit 2 before the alert check and the push', () => {
+  const result = gate(['--gates', 'static', '--peer', 'no-such-ref'], { ...bump, alerts: true });
+  assert.equal(result.status, 2);
+  assert.equal(result.stderr, 'ci-gate: --peer no-such-ref: no such commit\n');
+  assert.deepEqual(result.calls, []);
+  assert.deepEqual(result.refs, []);
+});
+
+// The alert check plans the tested tree with the peer's trailers and an iteration run's Selection, as the run's plan
+// will: a bump tree's class 1a gains a Mac job the mini's alert holds, its --affected iteration does not.
+test('the alert check sees the peer group a bump adds, and none for an --affected run, which goes ahead past an alert', () => {
+  const own = (path) => readFileSync(join(root, path), 'utf8');
+  const planned = { ...bump, base: { ...bump.base, '.github/scripts/gate-plan.mjs': own('.github/scripts/gate-plan.mjs'), '.github/scripts/gate-affected.mjs': own('.github/scripts/gate-affected.mjs'), '.github/workflows/gate.yml': own('.github/workflows/gate.yml'), 'package.json': own('package.json') }, alerts: true };
+  const held = gate(['--gates', 'static,unit,probes', '--class1a', 'pool'], planned);
+  assert.equal(held.status, 2, held.stdout + held.stderr);
+  assert.match(held.stderr, /^ci-gate: not pushing: this run puts jobs on a Mac \(e2e:cross-build\) /);
+  assert.deepEqual(held.refs, []);
+  const iteration = gate(['--gates', 'unit', '--class1a', 'pool', '--affected'], planned);
+  assert.equal(iteration.status, 1, iteration.stdout + iteration.stderr); // pushed; the fake gh finds no run
+  assert.match(trailers(iteration.message).join('\n'), /^Selection: affected$/m);
 });
